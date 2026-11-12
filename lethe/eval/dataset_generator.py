@@ -494,7 +494,7 @@ def build_sessions_dataset() -> Dict[str, Any]:
             })
 
         # Add rich engineering distraction dialogue across sessions (~52k+ tokens total)
-        extra_rounds = 7 if s_num in (26, 27, 28, 29) else (1 if s_num == 30 else 4)
+        extra_rounds = 9 if s_num in (26, 27, 28, 29) else (2 if s_num == 30 else 6)
         filler_turns = _build_filler_turns(
             session_num=s_num,
             day_ts=day_ts + 600.0,
