@@ -1,5 +1,6 @@
 import time
 import uuid
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from lethe.models import (
@@ -12,7 +13,7 @@ from lethe.models import (
 )
 from lethe.storage.db import DatabaseManager
 from lethe.storage.lineage import LineageManager
-from lethe.storage.tiers import RelationalTier, SemanticTier, ProceduralTier
+from lethe.storage.tiers import RelationalTier, SemanticTier, ProceduralTier, EmbeddingHelper
 from lethe.core.bitemporal import BitemporalManager
 from lethe.core.trust import TrustGateManager
 from lethe.core.knapsack import KnapsackPacker, count_tokens
@@ -87,10 +88,10 @@ class LetheMemory:
         conflicts = self.bitemporal.process_statement(node)
 
         # 3. Store in appropriate tier
-        if tier == StorageTier.SEMANTIC or tier == StorageTier.EPHEMERAL:
-            self.semantic.store(node)
-        else:
+        if tier == StorageTier.RELATIONAL:
             self.relational.store(node)
+        # Always maintain semantic indexing for natural-language query recall
+        self.semantic.store(node)
 
         # 4. Record Lineage DAG parent links
         for pid in node.parent_ids:
@@ -104,11 +105,11 @@ class LetheMemory:
         token_budget: int = 500,
         as_of_time: Optional[float] = None,
         entity_filter: Optional[str] = None,
-        min_relevance: float = 0.15
+        min_relevance: float = 0.12
     ) -> QueryResult:
         """
         Retrieves relevant memories within strict token budget.
-        Triggers honest abstention if no verified memories match.
+        Triggers honest abstention if no verified memories match or critical query terms are missing.
         """
         start_time = time.perf_counter()
         candidates: List[Tuple[MemoryNode, float]] = []
@@ -119,7 +120,7 @@ class LetheMemory:
             parts = entity_filter.split(".")
             if len(parts) == 2:
                 exact_match = self.bitemporal.query_active_attribute(parts[0], parts[1], as_of_time=as_of_time)
-                if exact_match and exact_match.status == MemoryStatus.ACTIVE:
+                if exact_match and exact_match.status in (MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT):
                     candidates.append((exact_match, 1.0))
 
         # 2. Search Semantic Tier
@@ -131,10 +132,41 @@ class LetheMemory:
                     continue
             candidates.append((node, score))
 
-        # 3. Honest Abstention Gate
-        # If no candidates or best candidate score is below min_relevance
-        top_score = max((score for _, score in candidates), default=0.0)
-        if not candidates or top_score < min_relevance:
+        # 3. Honest Abstention & Epistemic Term Coverage Gate
+        generic_words = {'number', 'name', 'info', 'information', 'details', 'detail', 'secret', 'give', 'tell', 'show', 'my', 'the'}
+        specific_q_words = [
+            EmbeddingHelper._stem(w)
+            for w in re.findall(r'\b[a-zA-Z0-9_]+\b', query.lower())
+            if w not in EmbeddingHelper.STOP_WORDS and w not in generic_words
+        ]
+        # Fall back to all non-stopwords if query consisted entirely of generic words
+        if not specific_q_words:
+            specific_q_words = [
+                EmbeddingHelper._stem(w)
+                for w in re.findall(r'\b[a-zA-Z0-9_]+\b', query.lower())
+                if w not in EmbeddingHelper.STOP_WORDS
+            ]
+
+        def calculate_term_coverage(node: MemoryNode) -> float:
+            if not specific_q_words:
+                return 1.0
+            doc_text = f"[{node.category}] {node.content}"
+            doc_stemmed = ' '.join(
+                EmbeddingHelper._stem(w)
+                for w in re.findall(r'\b[a-zA-Z0-9_]+\b', doc_text.lower())
+            )
+            matched = [w for w in specific_q_words if w in doc_stemmed]
+            return len(matched) / len(specific_q_words)
+
+        # Filter candidates: exact relational lookups (score >= 0.99) bypass fuzzy term coverage;
+        # semantic matches require at least 30% query term coverage and score >= min_relevance.
+        qualified_candidates: List[Tuple[MemoryNode, float]] = []
+        for node, score in candidates:
+            cov = calculate_term_coverage(node)
+            if (score >= 0.99 or cov >= 0.30) and score >= min_relevance:
+                qualified_candidates.append((node, score))
+
+        if not qualified_candidates:
             latency = (time.perf_counter() - start_time) * 1000.0
             abstain_msg = "I do not have verified memory regarding this query."
             tokens = count_tokens(abstain_msg)
@@ -146,6 +178,8 @@ class LetheMemory:
                 latency_ms=latency,
                 is_abstention=True
             )
+
+        candidates = qualified_candidates
 
         # 4. Deduplicate candidates keeping highest score
         deduped: Dict[str, Tuple[MemoryNode, float]] = {}

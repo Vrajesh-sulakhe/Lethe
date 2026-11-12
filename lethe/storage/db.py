@@ -200,7 +200,7 @@ class DatabaseManager:
             SELECT e.memory_id, e.vector_json, m.content, m.category, m.trust_level, m.status
             FROM embeddings e
             JOIN memories m ON e.memory_id = m.id
-            WHERE m.status = 'active'
+            WHERE m.status IN ('active', 'conflict')
         """)
         rows = cursor.fetchall()
         results = []

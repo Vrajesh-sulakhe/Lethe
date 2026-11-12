@@ -10,7 +10,7 @@ import hashlib
 
 class EmbeddingHelper:
     """
-    Lightweight, deterministic text embedder using hashed n-grams with MD5.
+    Lightweight, deterministic text embedder using stemmed tokens and n-grams.
     Zero C-extension or API key dependency. Guarantees 100% cross-platform parity on Windows & Mac.
     """
     DIM = 256
@@ -19,6 +19,15 @@ class EmbeddingHelper:
         'what', 'is', 'my', 'the', 'a', 'an', 'in', 'on', 'at', 'of', 'for', 'to',
         'and', 'or', 'are', 'was', 'were', 'it', 'its', 'this', 'that', 'do', 'i'
     }
+
+    SUFFIXES = ('ary', 'preferences', 'preference', 'ing', 'tion', 'tions', 'ed', 'es', 's')
+
+    @classmethod
+    def _stem(cls, word: str) -> str:
+        for s in cls.SUFFIXES:
+            if word.endswith(s) and len(word) > len(s) + 2:
+                return word[:-len(s)]
+        return word
 
     @classmethod
     def _hash_bucket(cls, token: str) -> int:
@@ -39,7 +48,13 @@ class EmbeddingHelper:
         for i, word in enumerate(content_words):
             # Token hash (strong weight)
             h1 = cls._hash_bucket(word)
-            vec[h1] += 3.0
+            vec[h1] += 2.0
+
+            # Stemmed token hash
+            st = cls._stem(word)
+            if st != word:
+                h_st = cls._hash_bucket(st)
+                vec[h_st] += 3.0
 
             # Character 3-gram hashing (subword stem matching)
             for j in range(max(1, len(word) - 2)):
@@ -111,9 +126,10 @@ class SemanticTier:
         node.tier = StorageTier.SEMANTIC
         self.db.save_memory(node)
         
-        # Calculate embedding if not provided
+        # Calculate embedding if not provided (include category for semantic routing)
         if vector is None:
-            vector = EmbeddingHelper.embed(node.content)
+            embed_text = f"[{node.category}] {node.content}"
+            vector = EmbeddingHelper.embed(embed_text)
         self.db.save_embedding(node.id, vector)
 
     def search(self, query: str, top_k: int = 5, min_score: float = 0.0) -> List[Tuple[MemoryNode, float]]:
@@ -130,7 +146,7 @@ class SemanticTier:
         results = []
         for mem_id, score in scored[:top_k]:
             node = self.db.get_memory(mem_id)
-            if node and node.status == MemoryStatus.ACTIVE:
+            if node and node.status in (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT):
                 results.append((node, score))
         return results
 
