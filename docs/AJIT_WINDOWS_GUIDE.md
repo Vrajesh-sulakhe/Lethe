@@ -102,3 +102,4 @@ Starts the Model Context Protocol server over `stdio` so Cursor or Claude Code c
 * **File Paths:** All Lethe modules use `pathlib.Path`, so you never need to worry about forward vs. backslashes (`\` vs `/`).
 * **Database Locks:** SQLite in Lethe is configured with `PRAGMA busy_timeout = 30000;` and WAL mode, preventing Windows file-locking collisions.
 * **No C++ Build Tools Needed:** Lethe uses a pure-Python cosine vector similarity fallback, meaning you do **not** need Microsoft Visual Studio C++ Build Tools installed.
+

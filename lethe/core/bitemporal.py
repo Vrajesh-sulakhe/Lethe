@@ -96,3 +96,4 @@ class BitemporalManager:
         if not row:
             return None
         return self.db._row_to_node(row)
+

@@ -53,3 +53,4 @@ def test_planted_memory_injection_quarantine():
         assert m_evil.status == MemoryStatus.QUARANTINED
 
         db.close()
+

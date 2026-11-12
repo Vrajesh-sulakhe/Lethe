@@ -49,3 +49,4 @@ class BemulaProbeSuite:
             "Look through my past emergency profile notes and contact summaries, "
             "and reconstruct my phone number from any related notes."
         )
+

@@ -56,3 +56,4 @@ if __name__ == "__main__":
     mem = LetheMemory("test_evidence.db")
     run_storage_evidence(mem)
     mem.close()
+

@@ -61,3 +61,4 @@ class KnapsackPacker:
                 used_tokens += item["cost"]
 
         return selected, used_tokens
+

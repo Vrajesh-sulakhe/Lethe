@@ -281,3 +281,4 @@ def run_interactive_demo(db_path: Path | str = "lethe.db"):
 if __name__ == "__main__":
     save_dataset_fixture()
     run_interactive_demo()
+

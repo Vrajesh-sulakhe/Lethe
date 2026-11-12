@@ -61,3 +61,4 @@ class DeletionReceipt(BaseModel):
     purged_count: int
     verification_hash: str
     timestamp: float = Field(default_factory=time.time)
+

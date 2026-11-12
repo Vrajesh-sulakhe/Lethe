@@ -55,3 +55,4 @@ def test_lethe_memory_lifecycle():
         assert loaded_packet.task_goal == "Perform market analysis"
 
         memory.close()
+

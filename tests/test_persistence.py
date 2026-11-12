@@ -42,3 +42,4 @@ def test_sqlite_persistence_across_restarts():
         assert restored_node.status == MemoryStatus.ACTIVE
         
         db_restarted.close()
+

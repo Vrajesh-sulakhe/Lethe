@@ -111,3 +111,4 @@ def test_contradiction_detection_with_sources():
         assert m2.status == MemoryStatus.CONFLICT
 
         db.close()
+

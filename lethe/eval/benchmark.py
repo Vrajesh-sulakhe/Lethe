@@ -97,3 +97,4 @@ def run_benchmark(db_path: Path | str = "lethe.db", memory: Optional[LetheMemory
 
 if __name__ == "__main__":
     run_benchmark()
+

@@ -61,3 +61,4 @@ def test_benchmark_metrics():
         assert results["token_savings_pct"] >= 99.0
         assert results["lethe_latency_ms"] < 50.0
         mem.close()
+

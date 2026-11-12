@@ -71,3 +71,4 @@ class TrustGateManager:
             "action": "SAVED",
             "reason": "Passed trust gate."
         }
+
