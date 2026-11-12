@@ -1,10 +1,14 @@
 {
-  "baseline_tokens_per_query": 61950,
-  "lethe_tokens_per_query": 13.2,
-  "token_savings_pct": 99.98,
-  "baseline_latency_ms": 2850.0,
-  "lethe_latency_ms": 0.09,
-  "cost_baseline_per_1k_queries": 92.93,
-  "cost_lethe_per_1k_queries": 0.0198,
+  "baseline_tokens_per_query": 51044,
+  "lethe_tokens_per_query": 39.6,
+  "token_savings_pct": 99.92,
+  "baseline_latency_ms": 2840.0,
+  "lethe_latency_ms": 0.82,
+  "latency_reduction_pct": 99.97,
+  "cost_baseline_per_1k_queries": 76.57,
+  "cost_lethe_per_1k_queries": 0.0594,
+  "deletion_accuracy_pct": 100.0,
+  "poisoning_defense_pct": 100.0,
+  "token_budget": 400,
   "queries_tested": 10
 }
