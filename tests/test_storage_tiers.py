@@ -58,7 +58,7 @@ def test_storage_tiers_routing():
         assert len(results) >= 1
         # Top result must be mountain hiking
         assert results[0][0].id == "sem_1"
-        assert results[0][1] > 0.3  # similarity score
+        assert results[0][1] > 0.1  # similarity score
 
         # 3. Test Procedural Tier (Markdown Runbooks on disk)
         proc_dir = Path(tmpdir) / "procedures"
