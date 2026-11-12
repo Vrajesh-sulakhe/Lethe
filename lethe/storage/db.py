@@ -157,6 +157,11 @@ class DatabaseManager:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
         row = cursor.fetchone()
+        if not row and len(memory_id) >= 6:
+            cursor.execute("SELECT * FROM memories WHERE id LIKE ? LIMIT 2", (f"{memory_id}%",))
+            matches = cursor.fetchall()
+            if len(matches) == 1:
+                row = matches[0]
         if not row:
             return None
         return self._row_to_node(row)

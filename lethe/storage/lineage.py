@@ -49,6 +49,18 @@ class LineageManager:
         5. Computes a cryptographic SHA-256 audit receipt.
         """
         cursor = self.db.conn.cursor()
+        
+        # Verify target node actually exists before purging
+        cursor.execute("SELECT id FROM memories WHERE id = ?", (target_id,))
+        if not cursor.fetchone():
+            return DeletionReceipt(
+                target_id=target_id,
+                purged_node_ids=[],
+                purged_count=0,
+                verification_hash="0" * 64,
+                timestamp=time.time()
+            )
+
         descendants = self.get_descendants(target_id)
         all_purged_ids = [target_id] + [d for d in descendants if d != target_id]
 

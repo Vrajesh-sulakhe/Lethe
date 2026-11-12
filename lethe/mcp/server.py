@@ -118,11 +118,23 @@ def create_mcp_server(db_path: Path | str = "lethe.db") -> MCPServer:
         }, indent=2)
 
     @server.tool()
-    def lethe_inspect(limit: int = 10) -> str:
+    def lethe_inspect(
+        limit: int = 10,
+        status: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> str:
         """
         Inspect active memories in the Lethe database with categories, trust levels, and provenance.
         """
-        memories = memory.db.list_memories()
+        target_status = None
+        if status:
+            try:
+                from lethe.models import MemoryStatus
+                target_status = MemoryStatus(status.lower())
+            except ValueError:
+                pass
+
+        memories = memory.db.list_memories(status=target_status, workspace_id=workspace_id)
         output = []
         for m in memories[:limit]:
             output.append({
@@ -132,6 +144,7 @@ def create_mcp_server(db_path: Path | str = "lethe.db") -> MCPServer:
                 "tier": m.tier.value,
                 "trust": m.trust_level,
                 "status": m.status.value,
+                "workspace_id": m.workspace_id,
                 "session": m.source_session
             })
         return json.dumps({"total_count": len(memories), "items": output}, indent=2)

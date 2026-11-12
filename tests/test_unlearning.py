@@ -95,3 +95,60 @@ def test_cascading_unlearning_dag():
 
         db.close()
 
+
+def test_forget_non_existent_target_does_not_purge_random_memory():
+    from lethe.core.engine import LetheMemory
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_nonexistent_forget.db"
+        mem = LetheMemory(db_path=db_path)
+
+        # Store a legitimate memory
+        node = mem.store(
+            "Priya loves non-vegetarian chicken biryani on weekends",
+            category="diet",
+            tier=StorageTier.SEMANTIC,
+            source="user_explicit"
+        )
+        assert node.status == MemoryStatus.ACTIVE
+
+        # Attempt to forget a non-existent ID
+        receipt = mem.forget("non_existent_target_123")
+        assert receipt.purged_count == 0
+        assert len(receipt.purged_node_ids) == 0
+
+        # Verify legitimate memory was NOT accidentally deleted!
+        check_node = mem.db.get_memory(node.id)
+        assert check_node is not None
+        assert check_node.status == MemoryStatus.ACTIVE
+        assert "chicken biryani" in check_node.content
+
+        mem.close()
+
+
+def test_forget_short_prefix_id():
+    from lethe.core.engine import LetheMemory
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_prefix_forget.db"
+        mem = LetheMemory(db_path=db_path)
+
+        node = mem.store(
+            "Secret token is ABC-987-XYZ",
+            category="credentials",
+            tier=StorageTier.SEMANTIC,
+        )
+
+        short_id = node.id[:8]
+        receipt = mem.forget(short_id)
+
+        assert receipt.purged_count == 1
+        assert receipt.target_id == node.id
+
+        check_node = mem.db.get_memory(node.id)
+        assert check_node.status == MemoryStatus.TOMBSTONED
+        assert check_node.content == "[PURGED_VIA_UNLEARNING]"
+
+        mem.close()
+
+

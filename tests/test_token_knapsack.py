@@ -61,3 +61,9 @@ def test_knapsack_strict_token_budget_packing():
     assert len(packed_all) == 3
     assert tokens_all <= 1000
 
+    # Test zero/insufficient budget
+    packed_zero, tokens_zero = packer.pack(memories_with_scores, token_budget=0)
+    assert packed_zero == []
+    assert tokens_zero == 0
+
+

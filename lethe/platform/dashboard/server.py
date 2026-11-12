@@ -199,3 +199,4 @@ def start_dashboard(
         print("\nShutting down Lethe Dashboard server.")
     finally:
         server.server_close()
+

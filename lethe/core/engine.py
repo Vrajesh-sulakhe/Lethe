@@ -202,6 +202,18 @@ class LetheMemory:
         candidate_list = list(deduped.values())
         packed_memories, used_tokens = self.knapsack.pack(candidate_list, token_budget)
 
+        if not packed_memories:
+            latency = (time.perf_counter() - start_time) * 1000.0
+            abstain_msg = "I do not have verified memory regarding this query within the requested token budget."
+            return QueryResult(
+                query=query,
+                memories=[],
+                context_text=abstain_msg,
+                tokens_used=count_tokens(abstain_msg),
+                latency_ms=latency,
+                is_abstention=True
+            )
+
         # 6. Format formatted context text with source provenance citations
         lines = []
         for mem in packed_memories:
@@ -228,17 +240,33 @@ class LetheMemory:
         """
         Executes verifiable cascading unlearning for target fact and all downstream lineages.
         """
-        # If passed an explicit ID in memories table
+        # 1. If passed an explicit ID or unique prefix in memories table
         target_node = self.db.get_memory(target_id_or_query)
         if target_node:
             return self.lineage.cascading_purge(target_node.id, reason=reason)
 
-        # If passed query text, find closest matching active memory
-        matches = self.semantic.search(target_id_or_query, top_k=1, min_score=0.1)
-        if matches:
-            return self.lineage.cascading_purge(matches[0][0].id, reason=reason)
+        # 2. If it looks like an identifier/token (no spaces, len >= 6) and was not found,
+        # never attempt fuzzy semantic unlearning to prevent deleting arbitrary memories.
+        cleaned = target_id_or_query.strip()
+        if " " not in cleaned and len(cleaned) >= 6:
+            return DeletionReceipt(
+                target_id=target_id_or_query,
+                purged_node_ids=[],
+                purged_count=0,
+                verification_hash="0" * 64,
+                timestamp=time.time()
+            )
 
-        # If nothing found, return empty receipt
+        # 3. If passed natural language query text, search with strict term overlap and threshold
+        matches = self.semantic.search(target_id_or_query, top_k=3, min_score=0.45)
+        if matches:
+            query_words = set(re.findall(r'\b[a-zA-Z0-9_]+\b', target_id_or_query.lower())) - EmbeddingHelper.STOP_WORDS
+            for top_node, score in matches:
+                doc_words = set(re.findall(r'\b[a-zA-Z0-9_]+\b', top_node.content.lower()))
+                if query_words and len(query_words & doc_words) >= 1:
+                    return self.lineage.cascading_purge(top_node.id, reason=reason)
+
+        # 4. If nothing verified found, return empty receipt
         return DeletionReceipt(
             target_id=target_id_or_query,
             purged_node_ids=[],
