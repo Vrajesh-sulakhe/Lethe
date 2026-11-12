@@ -11,9 +11,13 @@ from lethe.models import (
     HandoverPacket,
     DeletionReceipt,
 )
+from lethe.core.engine import LetheMemory
+from lethe.mcp.server import create_mcp_server
 
 __version__ = "0.1.0"
 __all__ = [
+    "LetheMemory",
+    "create_mcp_server",
     "StorageTier",
     "TrustLevel",
     "MemoryStatus",
