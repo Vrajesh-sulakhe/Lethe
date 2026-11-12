@@ -132,9 +132,15 @@ class SemanticTier:
             vector = EmbeddingHelper.embed(embed_text)
         self.db.save_embedding(node.id, vector)
 
-    def search(self, query: str, top_k: int = 5, min_score: float = 0.0) -> List[Tuple[MemoryNode, float]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        min_score: float = 0.0,
+        workspace_id: Optional[str] = None,
+    ) -> List[Tuple[MemoryNode, float]]:
         query_vec = EmbeddingHelper.embed(query)
-        active_embeddings = self.db.get_all_active_embeddings()
+        active_embeddings = self.db.get_all_active_embeddings(workspace_id=workspace_id)
 
         scored = []
         for item in active_embeddings:

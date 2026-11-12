@@ -15,12 +15,16 @@ def create_mcp_server(db_path: Path | str = "lethe.db") -> MCPServer:
     memory = LetheMemory(db_path=db_path)
 
     @server.tool()
-    def lethe_recall(query: str, token_budget: int = 500) -> str:
+    def lethe_recall(
+        query: str,
+        token_budget: int = 500,
+        workspace_id: Optional[str] = None,
+    ) -> str:
         """
         Retrieve relevant long-term memories within a strict token budget.
         Returns verified context text or an honest abstention ('I do not have verified memory...').
         """
-        res = memory.recall(query, token_budget=token_budget)
+        res = memory.recall(query, token_budget=token_budget, workspace_id=workspace_id)
         payload = {
             "query": res.query,
             "is_abstention": res.is_abstention,
@@ -36,7 +40,9 @@ def create_mcp_server(db_path: Path | str = "lethe.db") -> MCPServer:
         content: str,
         category: str = "general",
         tier: str = "semantic",
-        source: str = "user_explicit"
+        source: str = "user_explicit",
+        workspace_id: Optional[str] = None,
+        scope: str = "project",
     ) -> str:
         """
         Store a new fact, preference, or decision with provenance and trust level verification.
@@ -51,13 +57,17 @@ def create_mcp_server(db_path: Path | str = "lethe.db") -> MCPServer:
             content=content,
             category=category,
             tier=tier_enum,
-            source=source
+            source=source,
+            workspace_id=workspace_id,
+            scope=scope,
         )
         return json.dumps({
             "status": node.status.value,
             "memory_id": node.id,
             "trust_level": node.trust_level,
-            "content": node.content
+            "content": node.content,
+            "workspace_id": node.workspace_id,
+            "scope": node.scope,
         }, indent=2)
 
     @server.tool()

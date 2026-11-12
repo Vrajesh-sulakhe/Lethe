@@ -49,6 +49,50 @@ def cmd_benchmark(args):
     from lethe.eval.benchmark import run_benchmark
     run_benchmark(db_path=args.db)
 
+def cmd_setup(args):
+    from lethe.platform.setup import detect_installed_tools, setup_all_tools, generate_mcp_config
+    
+    print("=" * 80)
+    print(" LETHE CROSS-TOOL INTEGRATION HUB: ZERO-CONFIG SETUP")
+    print("=" * 80)
+
+    if args.check:
+        print("[Mode: Dry Run / Inspection Only]\n")
+        detected = detect_installed_tools()
+        print(f" {'Tool':<15} | {'Detected Path':<42} | {'Configured'}")
+        print("-" * 80)
+        for name, info in detected.items():
+            path_str = str(info['path'])
+            if len(path_str) > 40:
+                path_str = "..." + path_str[-37:]
+            status = "YES (Connected)" if info["is_configured"] else ("Ready to wire" if info["exists"] else "Not installed")
+            print(f" {name:<15} | {path_str:<42} | {status}")
+        print("=" * 80)
+        print("Run 'lethe setup' without --check to automatically wire detected tools.")
+        return
+
+    tools_to_wire = [args.tool] if args.tool != "all" else None
+    results = setup_all_tools(tools=tools_to_wire, db_path=args.db)
+
+    print(f"\nSuccessfully configured {len(results)} tool integrations:\n")
+    for r in results:
+        print(f" [✓] {r['tool'].upper():<12} -> {r['path']}")
+    
+    print("=" * 80)
+    print(" All selected tools are now wired to Lethe's universal MCP memory bus!")
+    print(" Open Cursor, Claude Code, or Antigravity and start working seamlessly.")
+    print("=" * 80)
+
+def cmd_ui(args):
+    from lethe.platform.dashboard.server import start_dashboard
+    start_dashboard(
+        db_path=args.db,
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="lethe",
@@ -76,6 +120,17 @@ def main():
     # benchmark command
     subparsers.add_parser("benchmark", help="Run the token & latency benchmark against full history")
 
+    # setup command
+    p_setup = subparsers.add_parser("setup", help="Auto-configure MCP integration for Cursor, Claude Code, Antigravity, and VS Code")
+    p_setup.add_argument("--check", action="store_true", help="Inspect and check detected tools without modifying files")
+    p_setup.add_argument("--tool", default="all", choices=["all", "cursor", "claude", "antigravity", "vscode"], help="Target specific tool")
+
+    # ui command
+    p_ui = subparsers.add_parser("ui", help="Launch the Lethe real-time developer dashboard")
+    p_ui.add_argument("--host", default="127.0.0.1", help="Dashboard host interface")
+    p_ui.add_argument("--port", type=int, default=8765, help="Dashboard port")
+    p_ui.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
+
     args = parser.parse_args()
 
     if args.subcommand == "mcp":
@@ -93,6 +148,10 @@ def main():
         cmd_demo(args)
     elif args.subcommand == "benchmark":
         cmd_benchmark(args)
+    elif args.subcommand == "setup":
+        cmd_setup(args)
+    elif args.subcommand == "ui":
+        cmd_ui(args)
     else:
         parser.print_help()
 

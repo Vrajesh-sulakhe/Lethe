@@ -36,6 +36,8 @@ class MemoryNode(BaseModel):
     valid_from: float = Field(default_factory=time.time)
     valid_to: Optional[float] = None
     parent_ids: List[str] = Field(default_factory=list)  # Lineage DAG links
+    workspace_id: Optional[str] = None                   # Scoped project/repo identifier
+    scope: str = "project"                                # 'project' or 'global'
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class QueryResult(BaseModel):

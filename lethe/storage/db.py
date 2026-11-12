@@ -4,6 +4,19 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from lethe.models import MemoryNode, MemoryStatus, StorageTier, HandoverPacket
 
+
+def get_current_workspace_id(start_path: Path | str = ".") -> str:
+    """
+    Resolves the active workspace identifier.
+    Traverses upwards to find the enclosing git repository root, or falls back to directory name.
+    """
+    p = Path(start_path).resolve()
+    for parent in [p] + list(p.parents):
+        if (parent / ".git").exists():
+            return parent.name
+    return p.name
+
+
 class DatabaseManager:
     """
     Cross-platform SQLite database manager for Lethe.
@@ -24,10 +37,18 @@ class DatabaseManager:
 
     def _init_pragmas(self):
         cursor = self.conn.cursor()
-        cursor.execute("PRAGMA journal_mode = WAL;")
         cursor.execute("PRAGMA busy_timeout = 30000;")
         cursor.execute("PRAGMA foreign_keys = ON;")
         cursor.execute("PRAGMA synchronous = NORMAL;")
+        
+        # Only set WAL if not already in WAL mode to avoid unnecessary lock contention
+        cursor.execute("PRAGMA journal_mode;")
+        row = cursor.fetchone()
+        if row and row[0].lower() != "wal":
+            try:
+                cursor.execute("PRAGMA journal_mode = WAL;")
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
 
     def _create_tables(self):
@@ -48,9 +69,22 @@ class DatabaseManager:
                 valid_from REAL NOT NULL,
                 valid_to REAL,
                 parent_ids_json TEXT NOT NULL DEFAULT '[]',
-                metadata_json TEXT NOT NULL DEFAULT '{}'
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                workspace_id TEXT,
+                scope TEXT NOT NULL DEFAULT 'project'
             );
         """)
+
+        # Migration: ensure workspace_id and scope columns exist
+        cursor.execute("PRAGMA table_info(memories);")
+        columns = [row["name"] for row in cursor.fetchall()]
+        if "workspace_id" not in columns:
+            cursor.execute("ALTER TABLE memories ADD COLUMN workspace_id TEXT;")
+        if "scope" not in columns:
+            cursor.execute("ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_workspace ON memories(workspace_id);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);")
 
         # Lineage DAG edges table
         cursor.execute("""
@@ -90,8 +124,8 @@ class DatabaseManager:
             INSERT OR REPLACE INTO memories (
                 id, content, category, tier, trust_level, status,
                 source_session, source_origin, created_at, valid_from, valid_to,
-                parent_ids_json, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parent_ids_json, metadata_json, workspace_id, scope
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             node.id,
             node.content,
@@ -105,7 +139,9 @@ class DatabaseManager:
             float(node.valid_from),
             float(node.valid_to) if node.valid_to is not None else None,
             json.dumps(node.parent_ids),
-            json.dumps(node.metadata)
+            json.dumps(node.metadata),
+            node.workspace_id,
+            node.scope or "project",
         ))
         
         # Register lineage edges for parent_ids
@@ -129,7 +165,8 @@ class DatabaseManager:
         self,
         category: Optional[str] = None,
         status: Optional[MemoryStatus] = None,
-        as_of_time: Optional[float] = None
+        as_of_time: Optional[float] = None,
+        workspace_id: Optional[str] = None,
     ) -> List[MemoryNode]:
         cursor = self.conn.cursor()
         query = "SELECT * FROM memories WHERE 1=1"
@@ -146,6 +183,10 @@ class DatabaseManager:
         if as_of_time is not None:
             query += " AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)"
             params.extend([as_of_time, as_of_time])
+
+        if workspace_id:
+            query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+            params.append(workspace_id)
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -194,14 +235,20 @@ class DatabaseManager:
             return None
         return json.loads(row["vector_json"])
 
-    def get_all_active_embeddings(self) -> List[Dict[str, Any]]:
+    def get_all_active_embeddings(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT e.memory_id, e.vector_json, m.content, m.category, m.trust_level, m.status
+        query = """
+            SELECT e.memory_id, e.vector_json, m.content, m.category, m.trust_level, m.status, m.workspace_id, m.scope
             FROM embeddings e
             JOIN memories m ON e.memory_id = m.id
             WHERE m.status IN ('active', 'conflict')
-        """)
+        """
+        params: List[Any] = []
+        if workspace_id:
+            query += " AND (m.workspace_id = ? OR m.scope = 'global' OR m.workspace_id IS NULL)"
+            params.append(workspace_id)
+
+        cursor.execute(query, params)
         rows = cursor.fetchall()
         results = []
         for r in rows:
@@ -211,7 +258,9 @@ class DatabaseManager:
                 "content": r["content"],
                 "category": r["category"],
                 "trust_level": r["trust_level"],
-                "status": r["status"]
+                "status": r["status"],
+                "workspace_id": r["workspace_id"] if "workspace_id" in r.keys() else None,
+                "scope": r["scope"] if "scope" in r.keys() else "project",
             })
         return results
 
@@ -232,6 +281,7 @@ class DatabaseManager:
         return HandoverPacket.model_validate_json(row["packet_json"])
 
     def _row_to_node(self, row: sqlite3.Row) -> MemoryNode:
+        keys = row.keys()
         return MemoryNode(
             id=row["id"],
             content=row["content"],
@@ -245,7 +295,9 @@ class DatabaseManager:
             valid_from=float(row["valid_from"]),
             valid_to=float(row["valid_to"]) if row["valid_to"] is not None else None,
             parent_ids=json.loads(row["parent_ids_json"]),
-            metadata=json.loads(row["metadata_json"])
+            workspace_id=row["workspace_id"] if "workspace_id" in keys else None,
+            scope=row["scope"] if "scope" in keys and row["scope"] else "project",
+            metadata=json.loads(row["metadata_json"]),
         )
 
     def close(self):

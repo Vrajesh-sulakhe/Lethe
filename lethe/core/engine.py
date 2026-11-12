@@ -11,7 +11,7 @@ from lethe.models import (
     HandoverPacket,
     DeletionReceipt,
 )
-from lethe.storage.db import DatabaseManager
+from lethe.storage.db import DatabaseManager, get_current_workspace_id
 from lethe.storage.lineage import LineageManager
 from lethe.storage.tiers import RelationalTier, SemanticTier, ProceduralTier, EmbeddingHelper
 from lethe.core.bitemporal import BitemporalManager
@@ -22,14 +22,16 @@ class LetheMemory:
     """
     Main coordinator for the Lethe Memory Operating System.
     Orchestrates tiered storage, lineage DAG unlearning, trust gates,
-    bitemporal clocks, and token budgeting.
+    bitemporal clocks, workspace scoping, and token budgeting.
     """
     def __init__(
         self,
         db_path: Path | str = "lethe.db",
-        procedures_dir: Path | str = "procedures"
+        procedures_dir: Path | str = "procedures",
+        workspace_id: Optional[str] = None,
     ):
         self.db = DatabaseManager(db_path)
+        self.workspace_id = workspace_id or get_current_workspace_id()
         self.lineage = LineageManager(self.db)
         self.relational = RelationalTier(self.db)
         self.semantic = SemanticTier(self.db)
@@ -48,7 +50,9 @@ class LetheMemory:
         session_id: str = "default_session",
         parent_ids: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        valid_from: Optional[float] = None
+        valid_from: Optional[float] = None,
+        workspace_id: Optional[str] = None,
+        scope: str = "project",
     ) -> MemoryNode:
         """
         Stores a memory through the trust gate, bitemporal clock, and lineage DAG.
@@ -76,6 +80,8 @@ class LetheMemory:
             created_at=now,
             valid_from=valid_from if valid_from is not None else now,
             parent_ids=parent_ids or [],
+            workspace_id=workspace_id or self.workspace_id,
+            scope=scope,
             metadata=metadata or {}
         )
 
@@ -105,7 +111,8 @@ class LetheMemory:
         token_budget: int = 500,
         as_of_time: Optional[float] = None,
         entity_filter: Optional[str] = None,
-        min_relevance: float = 0.12
+        min_relevance: float = 0.12,
+        workspace_id: Optional[str] = None,
     ) -> QueryResult:
         """
         Retrieves relevant memories within strict token budget.
@@ -123,8 +130,10 @@ class LetheMemory:
                 if exact_match and exact_match.status in (MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT):
                     candidates.append((exact_match, 1.0))
 
-        # 2. Search Semantic Tier
-        semantic_matches = self.semantic.search(query, top_k=10, min_score=0.0)
+        # 2. Search Semantic Tier (scoped by workspace if specified)
+        semantic_matches = self.semantic.search(
+            query, top_k=10, min_score=0.0, workspace_id=workspace_id
+        )
         for node, score in semantic_matches:
             # Check if memory was valid at as_of_time
             if as_of_time is not None:
