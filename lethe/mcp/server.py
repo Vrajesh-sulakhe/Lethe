@@ -2,8 +2,28 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from mcp.server.mcpserver import MCPServer
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from lethe.models import MemoryStatus, StorageTier
 from lethe.core.engine import LetheMemory
+
+
+def verify_mcp_preflight(
+    db_path: Path | str = "lethe.db",
+    procedures_dir: Path | str = "procedures",
+) -> Dict[str, Any]:
+    """
+    Executes pre-flight connectivity and integrity checks on the SQLite database
+    and procedures directory before launching the MCP listener.
+    """
+    mem = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
+    try:
+        health = mem.check_health()
+        if not health.get("healthy", False):
+            raise RuntimeError(f"Lethe pre-flight health check failed: {json.dumps(health)}")
+        return health
+    finally:
+        mem.close()
 
 
 def create_mcp_server(
@@ -12,10 +32,46 @@ def create_mcp_server(
 ) -> MCPServer:
     """
     Creates and configures the Lethe Model Context Protocol (MCP) server.
-    Exposes compact, low-schema-overhead memory tools across all tiers over stdio/SSE.
+    Exposes compact, low-schema-overhead memory tools across all tiers over
+    stdio, SSE, and streamable-http transports, plus HTTP /health and /stats endpoints.
     """
     server = MCPServer("lethe-memory")
     memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
+
+    @server.custom_route("/health", methods=["GET"])
+    async def http_health_check(request: Request) -> JSONResponse:
+        with memory.db._lock:
+            payload = memory.check_health()
+        status_code = 200 if payload.get("healthy") else 503
+        return JSONResponse(payload, status_code=status_code)
+
+    @server.custom_route("/stats", methods=["GET"])
+    async def http_stats_endpoint(request: Request) -> JSONResponse:
+        from lethe.platform.dashboard.server import DashboardRequestHandler
+
+        workspace = request.query_params.get("workspace")
+        with memory.db._lock:
+            stats = DashboardRequestHandler._build_stats_payload(
+                memory.db,
+                memory.procedural.procedures_dir,
+                workspace=workspace,
+            )
+            health = memory.check_health()
+        stats["health"] = {
+            "status": health["status"],
+            "journal_mode": health["journal_mode"],
+            "integrity": health["integrity"],
+            "schema_version": health["schema_version"],
+            "latency_ms": health["latency_ms"],
+        }
+        return JSONResponse(stats, status_code=200)
+
+    @server.tool()
+    def lethe_health() -> str:
+        """Check Lethe MCP server health, SQLite WAL status, schema version, and storage metrics."""
+        with memory.db._lock:
+            payload = memory.check_health()
+        return json.dumps(payload, indent=2)
 
     @server.tool()
     def lethe_recall(
@@ -29,16 +85,17 @@ def create_mcp_server(
         session_id: Optional[str] = None,
     ) -> str:
         """Recall verified memories within a strict post-format token budget."""
-        res = memory.recall(
-            query,
-            token_budget=token_budget,
-            as_of_time=as_of_time,
-            entity_filter=entity_filter,
-            workspace_id=workspace_id,
-            session_id=session_id,
-            model_name=model_name,
-            remaining_context_tokens=remaining_context_tokens,
-        )
+        with memory.db._lock:
+            res = memory.recall(
+                query,
+                token_budget=token_budget,
+                as_of_time=as_of_time,
+                entity_filter=entity_filter,
+                workspace_id=workspace_id,
+                session_id=session_id,
+                model_name=model_name,
+                remaining_context_tokens=remaining_context_tokens,
+            )
         return json.dumps(
             {
                 "query": res.query,
@@ -70,18 +127,19 @@ def create_mcp_server(
         except ValueError:
             tier_enum = StorageTier.SEMANTIC
 
-        node = memory.store(
-            content=content,
-            category=category,
-            tier=tier_enum,
-            source=source,
-            session_id=session_id,
-            parent_ids=parent_ids,
-            metadata=metadata,
-            valid_from=valid_from,
-            workspace_id=workspace_id,
-            scope=scope,
-        )
+        with memory.db._lock:
+            node = memory.store(
+                content=content,
+                category=category,
+                tier=tier_enum,
+                source=source,
+                session_id=session_id,
+                parent_ids=parent_ids,
+                metadata=metadata,
+                valid_from=valid_from,
+                workspace_id=workspace_id,
+                scope=scope,
+            )
         return json.dumps(
             {
                 "status": node.status.value,
@@ -102,7 +160,8 @@ def create_mcp_server(
         workspace_id: Optional[str] = None,
     ) -> str:
         """Cascade-purge memory and descendants across SQL/vectors with SHA-256 receipt."""
-        receipt = memory.forget(target, reason=reason, workspace_id=workspace_id)
+        with memory.db._lock:
+            receipt = memory.forget(target, reason=reason, workspace_id=workspace_id)
         return json.dumps(
             {
                 "target": receipt.target_id,
@@ -123,13 +182,14 @@ def create_mcp_server(
         tool_trace: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Export mid-task state packet for cross-tool continuation."""
-        packet = memory.export_handover(
-            task_id=task_id,
-            task_goal=task_goal,
-            active_memory_ids=active_memory_ids,
-            epistemic_state=epistemic_state,
-            tool_trace=tool_trace,
-        )
+        with memory.db._lock:
+            packet = memory.export_handover(
+                task_id=task_id,
+                task_goal=task_goal,
+                active_memory_ids=active_memory_ids,
+                epistemic_state=epistemic_state,
+                tool_trace=tool_trace,
+            )
         return json.dumps(
             {
                 "status": "HANDOVER_PACKET_CREATED",
@@ -144,7 +204,8 @@ def create_mcp_server(
     @server.tool()
     def lethe_handover_import(task_id: str) -> str:
         """Import a mid-task Handover Packet saved by another agent tool."""
-        packet = memory.import_handover(task_id)
+        with memory.db._lock:
+            packet = memory.import_handover(task_id)
         if not packet:
             return json.dumps({"error": f"Handover packet '{task_id}' not found."}, indent=2)
         return json.dumps(
@@ -181,11 +242,12 @@ def create_mcp_server(
             except ValueError:
                 pass
 
-        memories = memory.db.list_memories(
-            status=target_status,
-            workspace_id=workspace_id,
-            tier=target_tier,
-        )
+        with memory.db._lock:
+            memories = memory.db.list_memories(
+                status=target_status,
+                workspace_id=workspace_id,
+                tier=target_tier,
+            )
         output = [
             {
                 "id": m.id[:8],
@@ -204,12 +266,15 @@ def create_mcp_server(
     @server.tool()
     def lethe_procedures_list() -> str:
         """List stored Tier 3 Markdown runbooks without loading contents into context."""
-        return json.dumps({"procedures": memory.list_procedures()}, indent=2)
+        with memory.db._lock:
+            procs = memory.list_procedures()
+        return json.dumps({"procedures": procs}, indent=2)
 
     @server.tool()
     def lethe_procedure_read(filename: str) -> str:
         """Read a Tier 3 Markdown runbook on demand."""
-        content = memory.read_procedure(filename)
+        with memory.db._lock:
+            content = memory.read_procedure(filename)
         if content is None:
             return json.dumps({"error": f"Procedure '{filename}' not found."}, indent=2)
         return json.dumps({"filename": filename, "content": content}, indent=2)
@@ -217,7 +282,8 @@ def create_mcp_server(
     @server.tool()
     def lethe_procedure_write(filename: str, content: str) -> str:
         """Save or update a Tier 3 Markdown runbook on disk."""
-        saved = memory.save_procedure(filename, content)
+        with memory.db._lock:
+            saved = memory.save_procedure(filename, content)
         return json.dumps({"filename": saved.name, "path": str(saved)}, indent=2)
 
     @server.tool()
@@ -227,11 +293,12 @@ def create_mcp_server(
         promote_summary: Optional[str] = None,
     ) -> str:
         """Flush Tier 4 ephemeral scratchpad memory and optionally promote a concise summary."""
-        result = memory.flush_ephemeral(
-            session_id=session_id,
-            workspace_id=workspace_id,
-            promote_summary=promote_summary,
-        )
+        with memory.db._lock:
+            result = memory.flush_ephemeral(
+                session_id=session_id,
+                workspace_id=workspace_id,
+                promote_summary=promote_summary,
+            )
         return json.dumps(result, indent=2)
 
     return server
@@ -243,13 +310,22 @@ def main():
     parser = argparse.ArgumentParser(description="Lethe MCP Server")
     parser.add_argument("--db", default="lethe.db", help="Path to SQLite database file")
     parser.add_argument("--procedures-dir", default="procedures", help="Directory for Markdown runbooks")
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"], help="MCP transport mode")
-    parser.add_argument("--port", type=int, default=8000, help="Port for SSE transport")
+    parser.add_argument(
+        "--transport",
+        default="stdio",
+        choices=["stdio", "sse", "streamable-http"],
+        help="MCP transport mode",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Host interface for SSE / streamable-http transport")
+    parser.add_argument("--port", type=int, default=8000, help="Port for SSE / streamable-http transport")
     args = parser.parse_args()
 
+    verify_mcp_preflight(args.db, procedures_dir=args.procedures_dir)
     server = create_mcp_server(args.db, procedures_dir=args.procedures_dir)
     if args.transport == "sse":
-        server.run(transport="sse", port=args.port)
+        server.run(transport="sse", host=args.host, port=args.port)
+    elif args.transport == "streamable-http":
+        server.run(transport="streamable-http", host=args.host, port=args.port)
     else:
         server.run(transport="stdio")
 

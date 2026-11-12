@@ -126,6 +126,15 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_html("<h1>Lethe Dashboard UI</h1><p>index.html not found.</p>", 404)
             return
 
+        if path == "/health" or path == "/api/health":
+            db = DatabaseManager(self.db_path)
+            try:
+                health = db.check_health(procedures_dir=self.procedures_dir)
+                self._send_json(health, status=200 if health.get("healthy") else 503)
+            finally:
+                db.close()
+            return
+
         if path == "/api/procedures":
             self._handle_procedures(parsed_url.query)
             return
@@ -136,7 +145,7 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
 
         db = DatabaseManager(self.db_path)
         try:
-            if path == "/api/stats":
+            if path == "/api/stats" or path == "/stats":
                 params = parse_qs(parsed_url.query)
                 workspace = params.get("workspace", [None])[0]
                 stats = self._build_stats_payload(db, self.procedures_dir, workspace=workspace)

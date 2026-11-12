@@ -348,3 +348,4 @@ def test_cli_store_recall_and_procedures_commands():
             capture_output=True, text=True, check=True,
         )
         assert "ops.md" in r_proc.stdout
+

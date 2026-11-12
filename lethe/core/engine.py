@@ -479,5 +479,12 @@ class LetheMemory:
         """
         return self.db.get_handover_packet(task_id)
 
+    def check_health(self) -> Dict[str, Any]:
+        """
+        Checks the health of the database, WAL journal mode, schema version,
+        and procedures directory.
+        """
+        return self.db.check_health(procedures_dir=self.procedural.procedures_dir)
+
     def close(self):
         self.db.close()
