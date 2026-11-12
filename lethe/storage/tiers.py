@@ -15,32 +15,41 @@ class EmbeddingHelper:
     """
     DIM = 256
 
+    STOP_WORDS = {
+        'what', 'is', 'my', 'the', 'a', 'an', 'in', 'on', 'at', 'of', 'for', 'to',
+        'and', 'or', 'are', 'was', 'were', 'it', 'its', 'this', 'that', 'do', 'i'
+    }
+
     @classmethod
     def _hash_bucket(cls, token: str) -> int:
         return int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % cls.DIM
 
     @classmethod
     def embed(cls, text: str) -> List[float]:
-        words = re.findall(r'\b[a-zA-Z0-9_]+\b', text.lower())
+        raw_words = re.findall(r'\b[a-zA-Z0-9_]+\b', text.lower())
+        content_words = [w for w in raw_words if w not in cls.STOP_WORDS]
+        if not content_words:
+            content_words = raw_words
+
         vec = [0.0] * cls.DIM
-        if not words:
+        if not content_words:
             return vec
 
         # Token + character 3-gram hashing
-        for i, word in enumerate(words):
-            # Token hash
+        for i, word in enumerate(content_words):
+            # Token hash (strong weight)
             h1 = cls._hash_bucket(word)
-            vec[h1] += 2.0
+            vec[h1] += 3.0
 
-            # Character 3-gram hashing (subword matching)
+            # Character 3-gram hashing (subword stem matching)
             for j in range(max(1, len(word) - 2)):
                 tri = word[j:j+3]
                 h2 = cls._hash_bucket(tri)
                 vec[h2] += 0.5
 
             # Word bigram
-            if i < len(words) - 1:
-                bigram = f"{word}_{words[i+1]}"
+            if i < len(content_words) - 1:
+                bigram = f"{word}_{content_words[i+1]}"
                 h3 = cls._hash_bucket(bigram)
                 vec[h3] += 1.5
 
