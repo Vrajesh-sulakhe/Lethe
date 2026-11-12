@@ -98,16 +98,26 @@ class RelationalTier:
         node.tier = StorageTier.RELATIONAL
         self.db.save_memory(node)
 
-    def lookup_attribute(self, entity: str, attribute: str) -> Optional[MemoryNode]:
+    def lookup_attribute(
+        self,
+        entity: str,
+        attribute: str,
+        workspace_id: Optional[str] = None,
+    ) -> Optional[MemoryNode]:
         cursor = self.db.conn.cursor()
-        cursor.execute("""
+        query = """
             SELECT * FROM memories 
             WHERE status = 'active'
               AND json_extract(metadata_json, '$.entity') = ?
               AND json_extract(metadata_json, '$.attribute') = ?
-            ORDER BY valid_from DESC
-            LIMIT 1
-        """, (entity, attribute))
+        """
+        params: List[Any] = [entity, attribute]
+        if workspace_id:
+            query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+            params.append(workspace_id)
+        query += " ORDER BY valid_from DESC LIMIT 1"
+
+        cursor.execute(query, params)
         row = cursor.fetchone()
         if not row:
             return None
@@ -123,9 +133,9 @@ class SemanticTier:
         self.db = db
 
     def store(self, node: MemoryNode, vector: Optional[List[float]] = None) -> None:
-        node.tier = StorageTier.SEMANTIC
+        # Preserve node.tier (RELATIONAL / PROCEDURAL / EPHEMERAL / SEMANTIC)
         self.db.save_memory(node)
-        
+
         # Calculate embedding if not provided (include category for semantic routing)
         if vector is None:
             embed_text = f"[{node.category}] {node.content}"
@@ -138,21 +148,63 @@ class SemanticTier:
         top_k: int = 5,
         min_score: float = 0.0,
         workspace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        include_ephemeral: bool = True,
+        as_of_time: Optional[float] = None,
     ) -> List[Tuple[MemoryNode, float]]:
         query_vec = EmbeddingHelper.embed(query)
-        active_embeddings = self.db.get_all_active_embeddings(workspace_id=workspace_id)
+        active_embeddings = self.db.get_all_active_embeddings(
+            workspace_id=workspace_id,
+            as_of_time=as_of_time,
+        )
 
-        scored = []
+        # Filter ephemeral working memory out of cross-session long-term search
+        filtered_items: List[Dict[str, Any]] = []
         for item in active_embeddings:
-            score = EmbeddingHelper.cosine_similarity(query_vec, item["vector"])
-            if score >= min_score:
-                scored.append((item["memory_id"], score))
+            if item.get("tier") == StorageTier.EPHEMERAL.value:
+                if not include_ephemeral and (not session_id or item.get("source_session") != session_id):
+                    continue
+            filtered_items.append(item)
+
+        if not filtered_items:
+            return []
+
+        scored: List[Tuple[str, float]] = []
+        used_numpy = False
+        if len(filtered_items) >= 16:
+            try:
+                import numpy as np
+                mat = np.asarray([it["vector"] for it in filtered_items], dtype=np.float32)
+                q = np.asarray(query_vec, dtype=np.float32)
+                q_norm = float(np.linalg.norm(q))
+                if q_norm > 1e-9:
+                    norms = np.linalg.norm(mat, axis=1)
+                    denom = np.where(norms > 1e-9, norms * q_norm, 1.0)
+                    sims = (mat @ q) / denom
+                    sims = np.where(norms > 1e-9, sims, 0.0)
+                    for idx, score_val in enumerate(sims.tolist()):
+                        if score_val >= min_score:
+                            scored.append((filtered_items[idx]["memory_id"], float(score_val)))
+                    used_numpy = True
+            except Exception:
+                used_numpy = False
+
+        if not used_numpy:
+            for item in filtered_items:
+                score = EmbeddingHelper.cosine_similarity(query_vec, item["vector"])
+                if score >= min_score:
+                    scored.append((item["memory_id"], score))
 
         scored.sort(key=lambda x: x[1], reverse=True)
+        allowed_statuses = (
+            (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT, MemoryStatus.HISTORICAL)
+            if as_of_time is not None
+            else (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT)
+        )
         results = []
         for mem_id, score in scored[:top_k]:
             node = self.db.get_memory(mem_id)
-            if node and node.status in (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT):
+            if node and node.status in allowed_statuses:
                 results.append((node, score))
         return results
 
@@ -166,16 +218,33 @@ class ProceduralTier:
         self.procedures_dir = Path(procedures_dir)
         self.procedures_dir.mkdir(parents=True, exist_ok=True)
 
-    def read_procedure(self, filename: str) -> Optional[str]:
-        # Path traversal guard
-        safe_path = (self.procedures_dir / filename).resolve()
-        if not str(safe_path).startswith(str(self.procedures_dir.resolve())):
+    def _resolve_safe_path(self, filename: str) -> Optional[Path]:
+        base = self.procedures_dir.resolve()
+        candidate = (self.procedures_dir / filename).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
             return None
-        if safe_path.exists() and safe_path.is_file():
+        if candidate == base:
+            return None
+        return candidate
+
+    def save_procedure(self, filename: str, content: str) -> Path:
+        clean_name = filename if filename.endswith(".md") else f"{filename}.md"
+        safe_path = self._resolve_safe_path(clean_name)
+        if safe_path is None:
+            raise ValueError(f"Unsafe procedure path outside procedures_dir: {filename!r}")
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path.write_text(content, encoding="utf-8")
+        return safe_path
+
+    def read_procedure(self, filename: str) -> Optional[str]:
+        safe_path = self._resolve_safe_path(filename)
+        if safe_path is not None and safe_path.exists() and safe_path.is_file():
             return safe_path.read_text(encoding="utf-8")
         return None
 
     def list_procedures(self) -> List[str]:
         if not self.procedures_dir.exists():
             return []
-        return [f.name for f in self.procedures_dir.glob("*.md")]
+        return sorted(f.name for f in self.procedures_dir.glob("*.md"))

@@ -172,6 +172,8 @@ class DatabaseManager:
         status: Optional[MemoryStatus] = None,
         as_of_time: Optional[float] = None,
         workspace_id: Optional[str] = None,
+        tier: Optional[StorageTier] = None,
+        session_id: Optional[str] = None,
     ) -> List[MemoryNode]:
         cursor = self.conn.cursor()
         query = "SELECT * FROM memories WHERE 1=1"
@@ -184,6 +186,14 @@ class DatabaseManager:
         if status:
             query += " AND status = ?"
             params.append(status.value if isinstance(status, MemoryStatus) else str(status))
+
+        if tier:
+            query += " AND tier = ?"
+            params.append(tier.value if isinstance(tier, StorageTier) else str(tier))
+
+        if session_id:
+            query += " AND source_session = ?"
+            params.append(session_id)
 
         if as_of_time is not None:
             query += " AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)"
@@ -240,15 +250,33 @@ class DatabaseManager:
             return None
         return json.loads(row["vector_json"])
 
-    def get_all_active_embeddings(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_all_active_embeddings(
+        self,
+        workspace_id: Optional[str] = None,
+        as_of_time: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         cursor = self.conn.cursor()
-        query = """
-            SELECT e.memory_id, e.vector_json, m.content, m.category, m.trust_level, m.status, m.workspace_id, m.scope
-            FROM embeddings e
-            JOIN memories m ON e.memory_id = m.id
-            WHERE m.status IN ('active', 'conflict')
-        """
-        params: List[Any] = []
+        if as_of_time is not None:
+            query = """
+                SELECT e.memory_id, e.vector_json, m.content, m.category, m.tier,
+                       m.trust_level, m.status, m.source_session, m.workspace_id, m.scope
+                FROM embeddings e
+                JOIN memories m ON e.memory_id = m.id
+                WHERE m.status IN ('active', 'conflict', 'historical')
+                  AND m.valid_from <= ?
+                  AND (m.valid_to IS NULL OR m.valid_to > ?)
+            """
+            params: List[Any] = [as_of_time, as_of_time]
+        else:
+            query = """
+                SELECT e.memory_id, e.vector_json, m.content, m.category, m.tier,
+                       m.trust_level, m.status, m.source_session, m.workspace_id, m.scope
+                FROM embeddings e
+                JOIN memories m ON e.memory_id = m.id
+                WHERE m.status IN ('active', 'conflict')
+            """
+            params = []
+
         if workspace_id:
             query += " AND (m.workspace_id = ? OR m.scope = 'global' OR m.workspace_id IS NULL)"
             params.append(workspace_id)
@@ -257,15 +285,18 @@ class DatabaseManager:
         rows = cursor.fetchall()
         results = []
         for r in rows:
+            keys = r.keys()
             results.append({
                 "memory_id": r["memory_id"],
                 "vector": json.loads(r["vector_json"]),
                 "content": r["content"],
                 "category": r["category"],
+                "tier": r["tier"] if "tier" in keys else "semantic",
                 "trust_level": r["trust_level"],
                 "status": r["status"],
-                "workspace_id": r["workspace_id"] if "workspace_id" in r.keys() else None,
-                "scope": r["scope"] if "scope" in r.keys() else "project",
+                "source_session": r["source_session"] if "source_session" in keys else "default_session",
+                "workspace_id": r["workspace_id"] if "workspace_id" in keys else None,
+                "scope": r["scope"] if "scope" in keys else "project",
             })
         return results
 

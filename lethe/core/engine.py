@@ -16,7 +16,13 @@ from lethe.storage.lineage import LineageManager
 from lethe.storage.tiers import RelationalTier, SemanticTier, ProceduralTier, EmbeddingHelper
 from lethe.core.bitemporal import BitemporalManager
 from lethe.core.trust import TrustGateManager
-from lethe.core.knapsack import KnapsackPacker, count_tokens
+from lethe.core.knapsack import (
+    KnapsackPacker,
+    compute_effective_token_budget,
+    count_tokens,
+    format_citation_line,
+    truncate_to_tokens,
+)
 
 class LetheMemory:
     """
@@ -93,7 +99,11 @@ class LetheMemory:
         # 2. Bitemporal & Conflict Check
         conflicts = self.bitemporal.process_statement(node)
 
-        # 3. Store in appropriate tier
+        # 3. Store in appropriate tier (preserving exact StorageTier classification)
+        if tier == StorageTier.PROCEDURAL and node.metadata.get("filename"):
+            saved_path = self.procedural.save_procedure(str(node.metadata["filename"]), content)
+            node.metadata["filename"] = saved_path.name
+
         if tier == StorageTier.RELATIONAL:
             self.relational.store(node)
         # Always maintain semantic indexing for natural-language query recall
@@ -105,6 +115,74 @@ class LetheMemory:
 
         return node
 
+    def save_procedure(self, filename: str, content: str) -> Path:
+        """Writes a Markdown runbook into Tier 3 (ProceduralTier)."""
+        return self.procedural.save_procedure(filename, content)
+
+    def read_procedure(self, filename: str) -> Optional[str]:
+        """Reads a Markdown runbook from Tier 3 (ProceduralTier)."""
+        return self.procedural.read_procedure(filename)
+
+    def list_procedures(self) -> List[str]:
+        """Lists stored Markdown runbooks in Tier 3 (ProceduralTier)."""
+        return self.procedural.list_procedures()
+
+    def flush_ephemeral(
+        self,
+        session_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        promote_summary: Optional[str] = None,
+        category: str = "summary",
+    ) -> Dict[str, Any]:
+        """
+        Flushes Tier 4 (EPHEMERAL) working memory at session boundaries so temporary
+        scratchpad steps do not pollute long-term recall, optionally promoting a concise
+        summary into long-term SEMANTIC memory.
+        """
+        ephemeral_nodes = self.db.list_memories(
+            tier=StorageTier.EPHEMERAL,
+            session_id=session_id,
+            workspace_id=workspace_id,
+        )
+        flushed_ids: List[str] = []
+        seen_ids = set()
+        for node in ephemeral_nodes:
+            if node.status in (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT) and node.id not in seen_ids:
+                receipt = self.lineage.cascading_purge(node.id, reason="ephemeral_session_flush")
+                for pid in receipt.purged_node_ids:
+                    if pid not in seen_ids:
+                        seen_ids.add(pid)
+                        flushed_ids.append(pid)
+
+        promoted_memory_id: Optional[str] = None
+        if promote_summary:
+            promoted = self.store(
+                content=promote_summary,
+                category=category,
+                tier=StorageTier.SEMANTIC,
+                source="agent_inferred",
+                session_id=session_id or "default_session",
+                workspace_id=workspace_id or self.workspace_id,
+            )
+            promoted_memory_id = promoted.id
+
+        return {
+            "flushed_count": len(flushed_ids),
+            "flushed_ids": flushed_ids,
+            "promoted_memory_id": promoted_memory_id,
+        }
+
+    @staticmethod
+    def _bounded_abstention_text(base_msg: str, token_budget: int) -> str:
+        if token_budget <= 0:
+            return ""
+        if count_tokens(base_msg) <= token_budget:
+            return base_msg
+        short_msg = "No verified memory."
+        if count_tokens(short_msg) <= token_budget:
+            return short_msg
+        return truncate_to_tokens(short_msg, token_budget, suffix="")
+
     def recall(
         self,
         query: str,
@@ -113,29 +191,61 @@ class LetheMemory:
         entity_filter: Optional[str] = None,
         min_relevance: float = 0.12,
         workspace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        include_ephemeral: bool = False,
+        model_name: Optional[str] = None,
+        max_context_tokens: Optional[int] = None,
+        remaining_context_tokens: Optional[int] = None,
     ) -> QueryResult:
         """
-        Retrieves relevant memories within strict token budget.
-        Triggers honest abstention if no verified memories match or critical query terms are missing.
+        Retrieves relevant memories within strict post-format token budget.
+        Respects model context window ceilings and triggers honest abstention
+        when no verified memories match or critical query terms are missing.
         """
         start_time = time.perf_counter()
-        candidates: List[Tuple[MemoryNode, float]] = []
-        conflicts_detected: List[str] = []
+        effective_budget = compute_effective_token_budget(
+            token_budget=token_budget,
+            model_name=model_name,
+            max_context_tokens=max_context_tokens,
+            remaining_context_tokens=remaining_context_tokens,
+        )
+        if effective_budget <= 0:
+            latency = (time.perf_counter() - start_time) * 1000.0
+            return QueryResult(
+                query=query,
+                memories=[],
+                context_text="",
+                tokens_used=0,
+                latency_ms=latency,
+                is_abstention=True,
+            )
 
-        # 1. If entity filter provided, check Relational Tier
+        candidates: List[Tuple[MemoryNode, float]] = []
+
+        # 1. If entity filter provided, check Relational Tier within workspace scope
         if entity_filter:
             parts = entity_filter.split(".")
             if len(parts) == 2:
-                exact_match = self.bitemporal.query_active_attribute(parts[0], parts[1], as_of_time=as_of_time)
-                if exact_match and exact_match.status in (MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT):
+                exact_match = self.bitemporal.query_active_attribute(
+                    parts[0], parts[1], as_of_time=as_of_time, workspace_id=workspace_id
+                )
+                if exact_match and exact_match.status in (
+                    MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT
+                ):
                     candidates.append((exact_match, 1.0))
 
-        # 2. Search Semantic Tier (scoped by workspace if specified)
+        # 2. Search Semantic Tier with scalable candidate pool for 128K+ corpora
+        search_k = max(40, min(200, effective_budget // 10 + 30))
         semantic_matches = self.semantic.search(
-            query, top_k=10, min_score=0.0, workspace_id=workspace_id
+            query,
+            top_k=search_k,
+            min_score=0.0,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            include_ephemeral=include_ephemeral,
+            as_of_time=as_of_time,
         )
         for node, score in semantic_matches:
-            # Check if memory was valid at as_of_time
             if as_of_time is not None:
                 if node.valid_from > as_of_time or (node.valid_to and node.valid_to <= as_of_time):
                     continue
@@ -148,7 +258,6 @@ class LetheMemory:
             for w in re.findall(r'\b[a-zA-Z0-9_]+\b', query.lower())
             if w not in EmbeddingHelper.STOP_WORDS and w not in generic_words
         ]
-        # Fall back to all non-stopwords if query consisted entirely of generic words
         if not specific_q_words:
             specific_q_words = [
                 EmbeddingHelper._stem(w)
@@ -167,76 +276,142 @@ class LetheMemory:
             matched = [w for w in specific_q_words if w in doc_stemmed]
             return len(matched) / len(specific_q_words)
 
-        # Filter candidates: exact relational lookups (score >= 0.99) bypass fuzzy term coverage;
-        # semantic matches require at least 30% query term coverage and score >= min_relevance.
         qualified_candidates: List[Tuple[MemoryNode, float]] = []
         for node, score in candidates:
             cov = calculate_term_coverage(node)
             if (score >= 0.99 or cov >= 0.30) and score >= min_relevance:
-                qualified_candidates.append((node, score))
+                combined_score = score if score >= 0.99 else (0.65 * score + 0.35 * cov)
+                qualified_candidates.append((node, combined_score))
 
         if not qualified_candidates:
             latency = (time.perf_counter() - start_time) * 1000.0
-            abstain_msg = "I do not have verified memory regarding this query."
-            tokens = count_tokens(abstain_msg)
-            return QueryResult(
-                query=query,
-                memories=[],
-                context_text=abstain_msg,
-                tokens_used=tokens,
-                latency_ms=latency,
-                is_abstention=True
+            abstain_msg = self._bounded_abstention_text(
+                "I do not have verified memory regarding this query.", effective_budget
             )
-
-        candidates = qualified_candidates
-
-        # 4. Deduplicate candidates keeping highest score
-        deduped: Dict[str, Tuple[MemoryNode, float]] = {}
-        for node, score in candidates:
-            if node.id not in deduped or score > deduped[node.id][1]:
-                deduped[node.id] = (node, score)
-                if node.status == MemoryStatus.CONFLICT:
-                    conflicts_detected.append(f"Conflict on {node.category}: '{node.content}'")
-
-        # 5. Greedy Knapsack Packing into token_budget
-        candidate_list = list(deduped.values())
-        packed_memories, used_tokens = self.knapsack.pack(candidate_list, token_budget)
-
-        if not packed_memories:
-            latency = (time.perf_counter() - start_time) * 1000.0
-            abstain_msg = "I do not have verified memory regarding this query within the requested token budget."
             return QueryResult(
                 query=query,
                 memories=[],
                 context_text=abstain_msg,
                 tokens_used=count_tokens(abstain_msg),
                 latency_ms=latency,
-                is_abstention=True
+                is_abstention=True,
             )
 
-        # 6. Format formatted context text with source provenance citations
-        lines = []
-        for mem in packed_memories:
-            citation = f"[Memory #{mem.id[:6]} | Category: {mem.category} | Source: {mem.source_session} ({mem.source_origin}) | Trust: {mem.trust_level:.1f}]"
-            lines.append(f"{citation} {mem.content}")
+        # 4. Deduplicate candidates keeping highest score
+        deduped: Dict[str, Tuple[MemoryNode, float]] = {}
+        for node, score in qualified_candidates:
+            if node.id not in deduped or score > deduped[node.id][1]:
+                deduped[node.id] = (node, score)
 
-        if conflicts_detected:
-            lines.append("\n[EPISTEMIC CONFLICT WARNING: Multiple conflicting records exist for this topic.]")
+        candidate_list = list(deduped.values())
+        any_candidate_conflict = any(n.status == MemoryStatus.CONFLICT for n, _ in candidate_list)
+
+        verbose_warning = "\n[EPISTEMIC CONFLICT WARNING: Multiple conflicting records exist for this topic.]"
+        compact_warning = "[CONFLICT WARNING]"
+        banner_to_append = ""
+        reserved_banner = 0
+        if any_candidate_conflict:
+            full_banner_cost = count_tokens("\n" + verbose_warning)
+            if effective_budget > full_banner_cost + 20:
+                banner_to_append = verbose_warning
+                reserved_banner = full_banner_cost
+            elif effective_budget >= 20:
+                banner_to_append = compact_warning
+                reserved_banner = count_tokens("\n" + compact_warning)
+
+        # 5. Greedy Knapsack Packing using EXACT final citation formatting + banner reservation
+        packed_memories, _ = self.knapsack.pack(
+            candidate_list,
+            effective_budget,
+            formatter=lambda n: format_citation_line(n, compact=False),
+            reserved_tokens=reserved_banner,
+        )
+        use_compact = False
+
+        if not packed_memories:
+            packed_memories, _ = self.knapsack.pack(
+                candidate_list,
+                effective_budget,
+                formatter=lambda n: format_citation_line(n, compact=True),
+                reserved_tokens=reserved_banner,
+            )
+            use_compact = bool(packed_memories)
+
+        lines: List[str] = []
+        if packed_memories:
+            lines = [format_citation_line(m, compact=use_compact) for m in packed_memories]
+        elif effective_budget >= 20:
+            # Top verified candidate is individually larger than budget -> deliver a clean bounded slice
+            best_node, _ = max(
+                candidate_list,
+                key=lambda pair: (float(pair[1]) * float(pair[0].trust_level))
+            )
+            header = f"[#{best_node.id[:6]}|{best_node.category}|{best_node.trust_level:.1f}] "
+            header_cost = count_tokens(header)
+            avail = effective_budget - reserved_banner - header_cost
+            if avail >= 6:
+                sliced_content = truncate_to_tokens(best_node.content, avail)
+                if sliced_content:
+                    packed_memories = [best_node]
+                    lines = [header + sliced_content]
+
+        if not packed_memories:
+            latency = (time.perf_counter() - start_time) * 1000.0
+            abstain_msg = self._bounded_abstention_text(
+                "I do not have verified memory regarding this query within the requested token budget.",
+                effective_budget,
+            )
+            return QueryResult(
+                query=query,
+                memories=[],
+                context_text=abstain_msg,
+                tokens_used=count_tokens(abstain_msg),
+                latency_ms=latency,
+                is_abstention=True,
+            )
+
+        conflicts_detected = [
+            f"Conflict on {m.category}: '{m.content}'"
+            for m in packed_memories
+            if m.status == MemoryStatus.CONFLICT
+        ]
+        if conflicts_detected and banner_to_append:
+            lines.append(banner_to_append)
+
+        # Final BPE invariant guard: guarantee rendered context_text <= effective_budget
+        while lines and count_tokens("\n".join(lines)) > effective_budget:
+            if len(lines) > 1:
+                if conflicts_detected and lines[-1] == banner_to_append and len(lines) > 2:
+                    lines.pop(-2)
+                    packed_memories.pop(-1)
+                else:
+                    removed = lines.pop()
+                    if removed != banner_to_append and packed_memories:
+                        packed_memories.pop()
+            else:
+                lines[0] = truncate_to_tokens(lines[0], effective_budget, suffix="...")
+                break
 
         context_text = "\n".join(lines)
+        actual_tokens = count_tokens(context_text)
         latency = (time.perf_counter() - start_time) * 1000.0
 
         return QueryResult(
             query=query,
             memories=packed_memories,
             context_text=context_text,
-            tokens_used=used_tokens,
+            tokens_used=actual_tokens,
             latency_ms=latency,
             is_abstention=False,
-            conflicts_detected=conflicts_detected
+            conflicts_detected=conflicts_detected,
         )
 
-    def forget(self, target_id_or_query: str, reason: str = "user_deletion_request") -> DeletionReceipt:
+    def forget(
+        self,
+        target_id_or_query: str,
+        reason: str = "user_deletion_request",
+        workspace_id: Optional[str] = None,
+    ) -> DeletionReceipt:
         """
         Executes verifiable cascading unlearning for target fact and all downstream lineages.
         """
@@ -258,7 +433,9 @@ class LetheMemory:
             )
 
         # 3. If passed natural language query text, search with strict term overlap and threshold
-        matches = self.semantic.search(target_id_or_query, top_k=3, min_score=0.45)
+        matches = self.semantic.search(
+            target_id_or_query, top_k=3, min_score=0.45, workspace_id=workspace_id
+        )
         if matches:
             query_words = set(re.findall(r'\b[a-zA-Z0-9_]+\b', target_id_or_query.lower())) - EmbeddingHelper.STOP_WORDS
             for top_node, score in matches:

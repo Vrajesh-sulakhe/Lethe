@@ -26,25 +26,31 @@ class BitemporalManager:
             self.db.save_memory(node)
             return []
 
-        # Find existing active memories for the same entity and attribute
-        cursor.execute("""
+        # Find existing active memories for the same entity and attribute in scope
+        query = """
             SELECT * FROM memories
             WHERE status IN ('active', 'conflict')
               AND json_extract(metadata_json, '$.entity') = ?
               AND json_extract(metadata_json, '$.attribute') = ?
-        """, (entity, attribute))
+        """
+        params: List[Any] = [entity, attribute]
+        if node.workspace_id:
+            query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+            params.append(node.workspace_id)
+        cursor.execute(query, params)
         existing_rows = cursor.fetchall()
 
         if not existing_rows:
             self.db.save_memory(node)
             return []
 
+        saved_node = False
         for row in existing_rows:
             old_node = self.db._row_to_node(row)
             old_val = old_node.metadata.get("value")
 
             if old_val == new_val:
-                # Same value, update valid_from/metadata if needed
+                # Same value: maintain consistency without generating conflict
                 continue
 
             # Check if this is an update (new time strictly after old time) or contradiction
@@ -57,11 +63,13 @@ class BitemporalManager:
                 )
                 node.status = MemoryStatus.ACTIVE
                 self.db.save_memory(node)
+                saved_node = True
             else:
                 # Overlapping interval with conflicting values (Contradiction!)
                 self.db.update_memory_status(old_node.id, status=MemoryStatus.CONFLICT)
                 node.status = MemoryStatus.CONFLICT
                 self.db.save_memory(node)
+                saved_node = True
 
                 conflicts.append({
                     "entity": entity,
@@ -70,28 +78,37 @@ class BitemporalManager:
                     "message": f"Contradiction detected for {entity}.{attribute}: '{old_val}' (Source: {old_node.source_origin}) vs '{new_val}' (Source: {node.source_origin})"
                 })
 
+        if not saved_node:
+            self.db.save_memory(node)
+
         return conflicts
 
     def query_active_attribute(
         self,
         entity: str,
         attribute: str,
-        as_of_time: Optional[float] = None
+        as_of_time: Optional[float] = None,
+        workspace_id: Optional[str] = None,
     ) -> Optional[MemoryNode]:
         cursor = self.db.conn.cursor()
         if as_of_time is None:
             as_of_time = time.time()
 
-        cursor.execute("""
+        query = """
             SELECT * FROM memories
             WHERE json_extract(metadata_json, '$.entity') = ?
               AND json_extract(metadata_json, '$.attribute') = ?
               AND valid_from <= ?
               AND (valid_to IS NULL OR valid_to > ?)
               AND status IN ('active', 'conflict', 'historical')
-            ORDER BY valid_from DESC
-            LIMIT 1
-        """, (entity, attribute, as_of_time, as_of_time))
+        """
+        params: List[Any] = [entity, attribute, as_of_time, as_of_time]
+        if workspace_id:
+            query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+            params.append(workspace_id)
+        query += " ORDER BY valid_from DESC LIMIT 1"
+
+        cursor.execute(query, params)
         row = cursor.fetchone()
         if not row:
             return None
