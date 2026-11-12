@@ -493,8 +493,8 @@ def build_sessions_dataset() -> Dict[str, Any]:
                 "timestamp": day_ts + 60.0,
             })
 
-        # Add rich engineering distraction dialogue across sessions (~52k tokens total)
-        extra_rounds = 6 if s_num in (26, 27, 28, 29) else (1 if s_num == 30 else 4)
+        # Add rich engineering distraction dialogue across sessions (~52k+ tokens total)
+        extra_rounds = 7 if s_num in (26, 27, 28, 29) else (1 if s_num == 30 else 4)
         filler_turns = _build_filler_turns(
             session_num=s_num,
             day_ts=day_ts + 600.0,
