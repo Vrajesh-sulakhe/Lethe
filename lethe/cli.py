@@ -860,7 +860,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_branch.add_argument("--json", action="store_true", help="Output branch listing as JSON")
     branch_sub = p_branch.add_subparsers(dest="branch_action")
     p_br_list = branch_sub.add_parser("list", parents=[common], help="List all memory branches")
-    p_br_list.add_argument("--json", action="store_true", help="Output branch listing as JSON")
+    p_br_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output branch listing as JSON")
     p_br_create = branch_sub.add_parser("create", parents=[common], help="Create a new memory branch")
     p_br_create.add_argument("name", help="Branch name")
     p_br_create.add_argument("--from", dest="from_branch", default=None, help="Parent branch to fork from")

@@ -63,7 +63,21 @@ class DatabaseManager:
 
     def _create_tables(self):
         cursor = self.conn.cursor()
-        
+        cursor.execute("PRAGMA user_version;")
+        ver_row = cursor.fetchone()
+        current_ver = int(ver_row[0]) if ver_row else 0
+        if current_ver >= self.SCHEMA_VERSION:
+            cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlearning_tombstones'"
+            )
+            if cursor.fetchone() is not None:
+                return
+
+        try:
+            cursor.execute("BEGIN IMMEDIATE;")
+        except sqlite3.OperationalError:
+            pass
+
         # Memories table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -121,19 +135,36 @@ class DatabaseManager:
             );
         """)
 
-        # Handover packets table
+        # Handover packets table (branch-isolated composite PK)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS handover_packets (
-                task_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
                 packet_json TEXT NOT NULL,
                 created_at REAL NOT NULL,
-                branch TEXT NOT NULL DEFAULT 'main'
+                branch TEXT NOT NULL DEFAULT 'main',
+                PRIMARY KEY (task_id, branch)
             );
         """)
         cursor.execute("PRAGMA table_info(handover_packets);")
-        hp_columns = [row["name"] for row in cursor.fetchall()]
-        if "branch" not in hp_columns:
-            cursor.execute("ALTER TABLE handover_packets ADD COLUMN branch TEXT NOT NULL DEFAULT 'main';")
+        hp_info = {row["name"]: dict(row) for row in cursor.fetchall()}
+        if "branch" not in hp_info or int(hp_info["branch"].get("pk", 0)) == 0:
+            if "branch" not in hp_info:
+                cursor.execute("ALTER TABLE handover_packets ADD COLUMN branch TEXT NOT NULL DEFAULT 'main';")
+            cursor.execute("""
+                CREATE TABLE handover_packets_v4 (
+                    task_id TEXT NOT NULL,
+                    packet_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    branch TEXT NOT NULL DEFAULT 'main',
+                    PRIMARY KEY (task_id, branch)
+                );
+            """)
+            cursor.execute("""
+                INSERT OR REPLACE INTO handover_packets_v4 (task_id, packet_json, created_at, branch)
+                SELECT task_id, packet_json, created_at, COALESCE(branch, 'main') FROM handover_packets;
+            """)
+            cursor.execute("DROP TABLE handover_packets;")
+            cursor.execute("ALTER TABLE handover_packets_v4 RENAME TO handover_packets;")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_handover_branch_created ON handover_packets(branch, created_at);")
 
         # Memory Git branches table
@@ -141,14 +172,19 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS memory_branches (
                 name TEXT PRIMARY KEY,
                 parent_branch TEXT,
+                parent_commit_id TEXT,
                 head_commit_id TEXT,
                 created_at REAL NOT NULL,
                 description TEXT NOT NULL DEFAULT ''
             );
         """)
+        cursor.execute("PRAGMA table_info(memory_branches);")
+        mb_cols = [row["name"] for row in cursor.fetchall()]
+        if "parent_commit_id" not in mb_cols:
+            cursor.execute("ALTER TABLE memory_branches ADD COLUMN parent_commit_id TEXT;")
         cursor.execute("""
-            INSERT OR IGNORE INTO memory_branches (name, parent_branch, head_commit_id, created_at, description)
-            VALUES ('main', NULL, NULL, ?, 'Default memory branch')
+            INSERT OR IGNORE INTO memory_branches (name, parent_branch, parent_commit_id, head_commit_id, created_at, description)
+            VALUES ('main', NULL, NULL, NULL, ?, 'Default memory branch')
         """, (time.time(),))
 
         # Memory Git commits (snapshots) table
@@ -163,6 +199,16 @@ class DatabaseManager:
             );
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_commits_branch_created ON memory_commits(branch, created_at);")
+
+        # Permanent branch-independent unlearning tombstone registry (never deleted on rollback or branch delete)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS unlearning_tombstones (
+                memory_id TEXT PRIMARY KEY,
+                logical_key TEXT,
+                purged_at REAL NOT NULL
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tombstones_logical_key ON unlearning_tombstones(logical_key);")
 
         # Reactive sync global state & per-client delivery cursors
         cursor.execute("""
@@ -545,10 +591,25 @@ class DatabaseManager:
             """, (packet.task_id, packet.model_dump_json(), packet.created_at, packet.branch or "main"))
             self.conn.commit()
 
-    def get_handover_packet(self, task_id: str) -> Optional[HandoverPacket]:
+    def get_handover_packet(self, task_id: str, branch: Optional[str] = None) -> Optional[HandoverPacket]:
         with self._lock:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT packet_json, branch FROM handover_packets WHERE task_id = ?", (task_id,))
+            if branch is not None:
+                cursor.execute(
+                    "SELECT packet_json, branch FROM handover_packets WHERE task_id = ? AND branch = ?",
+                    (task_id, branch),
+                )
+            else:
+                active = self.get_active_branch()
+                cursor.execute(
+                    """
+                    SELECT packet_json, branch FROM handover_packets
+                    WHERE task_id = ?
+                    ORDER BY (branch = ?) DESC, created_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (task_id, active),
+                )
             row = cursor.fetchone()
             if not row:
                 return None
@@ -562,7 +623,7 @@ class DatabaseManager:
             cursor = self.conn.cursor()
             target_branch = branch or self.get_active_branch()
             cursor.execute(
-                "SELECT packet_json, branch FROM handover_packets WHERE branch = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT packet_json, branch FROM handover_packets WHERE branch = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (target_branch,),
             )
             row = cursor.fetchone()
@@ -594,6 +655,7 @@ class DatabaseManager:
         self,
         name: str,
         parent_branch: Optional[str] = None,
+        parent_commit_id: Optional[str] = None,
         head_commit_id: Optional[str] = None,
         description: str = "",
     ) -> Dict[str, Any]:
@@ -602,19 +664,29 @@ class DatabaseManager:
             cursor = self.conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO memory_branches (name, parent_branch, head_commit_id, created_at, description)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO memory_branches (name, parent_branch, parent_commit_id, head_commit_id, created_at, description)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (name, parent_branch, head_commit_id, now, description),
+                (name, parent_branch, parent_commit_id, head_commit_id, now, description),
             )
             self.conn.commit()
             return {
                 "name": name,
                 "parent_branch": parent_branch,
+                "parent_commit_id": parent_commit_id,
                 "head_commit_id": head_commit_id,
                 "created_at": now,
                 "description": description,
             }
+
+    def update_branch_parent_commit(self, name: str, parent_commit_id: Optional[str]) -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE memory_branches SET parent_commit_id = ? WHERE name = ?",
+                (parent_commit_id, name),
+            )
+            self.conn.commit()
 
     def get_branch_record(self, name: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -697,15 +769,120 @@ class DatabaseManager:
             cursor = self.conn.cursor()
             if branch is not None:
                 cursor.execute(
-                    "SELECT * FROM memory_commits WHERE branch = ? ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM memory_commits WHERE branch = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (branch, limit),
                 )
             else:
                 cursor.execute(
-                    "SELECT * FROM memory_commits ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM memory_commits ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (limit,),
                 )
             return [dict(r) for r in cursor.fetchall()]
+
+    def record_unlearning_tombstones(
+        self,
+        entries: List[tuple[str, Optional[str], float]],
+    ) -> None:
+        if not entries:
+            return
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.executemany(
+                """
+                INSERT OR REPLACE INTO unlearning_tombstones (memory_id, logical_key, purged_at)
+                VALUES (?, ?, ?)
+                """,
+                entries,
+            )
+            self.conn.commit()
+
+    def is_tombstoned_permanent(
+        self,
+        memory_ids: List[str],
+        logical_key: Optional[str] = None,
+    ) -> bool:
+        cleaned = [str(m) for m in memory_ids if m]
+        with self._lock:
+            cursor = self.conn.cursor()
+            if cleaned:
+                placeholders = ",".join("?" for _ in cleaned)
+                cursor.execute(
+                    f"SELECT 1 FROM unlearning_tombstones WHERE memory_id IN ({placeholders}) LIMIT 1",
+                    cleaned,
+                )
+                if cursor.fetchone() is not None:
+                    return True
+                cursor.execute(
+                    f"SELECT 1 FROM memories WHERE id IN ({placeholders}) AND status = ? LIMIT 1",
+                    [*cleaned, MemoryStatus.TOMBSTONED.value],
+                )
+                if cursor.fetchone() is not None:
+                    return True
+            if logical_key:
+                cursor.execute(
+                    "SELECT 1 FROM unlearning_tombstones WHERE logical_key = ? LIMIT 1",
+                    (logical_key,),
+                )
+                if cursor.fetchone() is not None:
+                    return True
+            return False
+
+    def scrub_unlearned_history(self, purged_ids: List[str]) -> None:
+        """
+        Scrubs unlearned memory content from stored commits and audit logs so purged
+        secrets/PII cannot survive in commit snapshots or reactive sync streams.
+        """
+        id_set = {str(pid) for pid in purged_ids if pid}
+        if not id_set:
+            return
+        with self._lock:
+            cursor = self.conn.cursor()
+            # 1. Scrub audit_events.details_json entries referencing purged target_ids
+            placeholders = ",".join("?" for _ in id_set)
+            cursor.execute(
+                f"SELECT id, details_json FROM audit_events WHERE target_id IN ({placeholders})",
+                list(id_set),
+            )
+            for row in cursor.fetchall():
+                try:
+                    details = json.loads(row["details_json"]) if row["details_json"] else {}
+                except Exception:
+                    details = {}
+                if "summary" in details:
+                    details["summary"] = "[PURGED_VIA_UNLEARNING]"
+                cursor.execute(
+                    "UPDATE audit_events SET details_json = ? WHERE id = ?",
+                    (json.dumps(details), row["id"]),
+                )
+
+            # 2. Scrub memory_commits.snapshot_json nodes matching purged IDs
+            cursor.execute("SELECT id, snapshot_json FROM memory_commits")
+            for crow in cursor.fetchall():
+                try:
+                    snap = json.loads(crow["snapshot_json"])
+                except Exception:
+                    continue
+                mems = snap.get("memories")
+                if not isinstance(mems, list):
+                    continue
+                changed = False
+                for item in mems:
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = str(item.get("id", ""))
+                    origin_id = str((item.get("metadata") or {}).get("origin_memory_id", ""))
+                    if item_id in id_set or (origin_id and origin_id in id_set):
+                        item["content"] = "[PURGED_VIA_UNLEARNING]"
+                        item["status"] = MemoryStatus.TOMBSTONED.value
+                        if isinstance(item.get("metadata"), dict):
+                            item["metadata"] = {"purged": True}
+                        changed = True
+                if changed:
+                    cursor.execute(
+                        "UPDATE memory_commits SET snapshot_json = ? WHERE id = ?",
+                        (json.dumps(snap), crow["id"]),
+                    )
+            self.conn.commit()
 
     def get_data_version(self) -> int:
         with self._lock:

@@ -54,7 +54,7 @@ class CryptographicLedger:
 
     def __init__(self, db: DatabaseManager):
         self.db = db
-        self._lock = threading.Lock()
+        self._lock = db._lock
 
     def get_or_create_salt(self, node_id: str) -> str:
         """Retrieves or generates a cryptographically random 32-char hex salt for a node."""

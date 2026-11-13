@@ -105,25 +105,26 @@ class RelationalTier:
         workspace_id: Optional[str] = None,
         branch: str = "main",
     ) -> Optional[MemoryNode]:
-        cursor = self.db.conn.cursor()
-        query = """
-            SELECT * FROM memories 
-            WHERE status = 'active'
-              AND branch = ?
-              AND json_extract(metadata_json, '$.entity') = ?
-              AND json_extract(metadata_json, '$.attribute') = ?
-        """
-        params: List[Any] = [branch or "main", entity, attribute]
-        if workspace_id:
-            query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
-            params.append(workspace_id)
-        query += " ORDER BY valid_from DESC LIMIT 1"
+        with self.db._lock:
+            cursor = self.db.conn.cursor()
+            query = """
+                SELECT * FROM memories 
+                WHERE status = 'active'
+                  AND branch = ?
+                  AND json_extract(metadata_json, '$.entity') = ?
+                  AND json_extract(metadata_json, '$.attribute') = ?
+            """
+            params: List[Any] = [branch or "main", entity, attribute]
+            if workspace_id:
+                query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+                params.append(workspace_id)
+            query += " ORDER BY valid_from DESC LIMIT 1"
 
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-        if not row:
-            return None
-        return self.db._row_to_node(row)
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self.db._row_to_node(row)
 
 
 class SemanticTier:

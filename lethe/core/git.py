@@ -11,11 +11,10 @@ from lethe.models import (
     MemoryNode,
     MemoryStatus,
     MergeResult,
-    StorageTier,
 )
 from lethe.storage.db import DatabaseManager
 from lethe.storage.lineage import LineageManager
-from lethe.storage.tiers import EmbeddingHelper, SemanticTier
+from lethe.storage.tiers import SemanticTier
 
 _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/-]{1,80}$")
 
@@ -82,7 +81,8 @@ class MemoryGitManager:
         branch_row = self.db.create_branch_record(
             name=target_name,
             parent_branch=source_branch,
-            head_commit_id=source_rec.get("head_commit_id") if source_rec else None,
+            parent_commit_id=source_rec.get("head_commit_id") if source_rec else None,
+            head_commit_id=None,
             description=description,
         )
 
@@ -118,19 +118,18 @@ class MemoryGitManager:
 
         latest_hp = self.db.get_latest_handover_packet(branch=source_branch)
         if latest_hp:
-            cloned_hp = latest_hp.model_copy(
-                update={"task_id": f"{latest_hp.task_id}@{target_name}", "branch": target_name}
-            )
+            cloned_hp = latest_hp.model_copy(update={"branch": target_name})
             self.db.save_handover_packet(cloned_hp)
 
-        self.commit(f"branch created from {source_branch}", branch=target_name)
+        fork_commit = self.commit(f"branch created from {source_branch}", branch=target_name)
+        self.db.update_branch_parent_commit(target_name, fork_commit.id)
         if switch:
             self.switch_branch(target_name)
 
         self.db.log_audit_event(
             "BRANCH_CREATED",
             target_id=target_name,
-            details={"from_branch": source_branch, "switched": switch},
+            details={"from_branch": source_branch, "switched": switch, "branch": target_name},
         )
         updated = self.db.get_branch_record(target_name) or branch_row
         return BranchInfo(**updated)
@@ -165,7 +164,7 @@ class MemoryGitManager:
         snapshot_memories = [
             n.model_dump()
             for n in nodes
-            if n.status != MemoryStatus.TOMBSTONED
+            if n.status != MemoryStatus.TOMBSTONED and not self._is_tombstoned(n.model_dump())
         ]
         latest_hp = self.db.get_latest_handover_packet(branch=target_branch)
         snapshot = {
@@ -194,30 +193,35 @@ class MemoryGitManager:
         return [MemoryCommit(**row) for row in self.db.list_commits(branch=target_branch, limit=limit)]
 
     def _is_tombstoned(self, node_data: Dict[str, Any]) -> bool:
-        """Checks both direct ID and origin_memory_id so unlearning stays irreversible."""
-        candidate_ids = [node_data.get("id")]
+        """Checks permanent tombstones and lineage origin so unlearning stays irreversible across branches."""
+        candidate_ids: List[str] = []
+        if node_data.get("id"):
+            candidate_ids.append(str(node_data["id"]))
         origin_id = (node_data.get("metadata") or {}).get("origin_memory_id")
         if origin_id:
-            candidate_ids.append(origin_id)
-        for cid in candidate_ids:
-            if not cid:
-                continue
-            existing = self.db.get_memory(str(cid))
-            if existing and existing.status == MemoryStatus.TOMBSTONED:
-                return True
-        return False
+            candidate_ids.append(str(origin_id))
+        return self.db.is_tombstoned_permanent(candidate_ids)
 
     def _resolve_commit_target(self, target: str, branch: str) -> Dict[str, Any]:
         cleaned = (target or "").strip()
         if not cleaned:
             raise ValueError("Rollback target commit or step is required.")
 
-        steps_match = re.match(r"^(?:HEAD)?~(\d+)$", cleaned, flags=re.IGNORECASE)
-        if steps_match or cleaned.isdigit():
-            steps = int(steps_match.group(1) if steps_match else cleaned)
+        if cleaned.upper() == "HEAD":
+            steps = 0
+        else:
+            steps_match = re.match(r"^(?:HEAD)?~(\d+)$", cleaned, flags=re.IGNORECASE)
+            if steps_match or cleaned.isdigit():
+                steps = int(steps_match.group(1) if steps_match else cleaned)
+            else:
+                steps = -1
+
+        if steps >= 0:
             commits = self.db.list_commits(branch=branch, limit=steps + 10)
             if steps >= len(commits):
-                raise ValueError(f"Rollback step '{cleaned}' exceeds commit history ({len(commits)} commits) on '{branch}'.")
+                raise ValueError(
+                    f"Rollback step '{cleaned}' exceeds commit history ({len(commits)} commits) on '{branch}'."
+                )
             return commits[steps]
 
         commit_row = self.db.get_commit(cleaned)
@@ -229,40 +233,47 @@ class MemoryGitManager:
         target_branch = _validate_branch_name(branch) if branch else self.current_branch()
         target_commit = self._resolve_commit_target(target, target_branch)
 
-        # Save safety checkpoint before mutating state
-        self.commit(f"auto: pre-rollback checkpoint before {target_commit['id']}", branch=target_branch)
-
+        # Parse & validate full snapshot BEFORE mutating database state
         snapshot = json.loads(target_commit["snapshot_json"])
-        restored_nodes: List[Dict[str, Any]] = snapshot.get("memories", [])
-
-        # Clear non-tombstoned memories on target_branch while leaving TOMBSTONED rows intact
-        with self.db._lock:
-            cursor = self.db.conn.cursor()
-            cursor.execute(
-                "DELETE FROM memories WHERE branch = ? AND status != ?",
-                (target_branch, MemoryStatus.TOMBSTONED.value),
-            )
-            self.db.conn.commit()
-
-        restored_count = 0
-        for raw in restored_nodes:
+        validated_nodes: List[MemoryNode] = []
+        for raw in snapshot.get("memories", []):
             if self._is_tombstoned(raw):
                 continue
             node = MemoryNode.model_validate(raw)
             node.branch = target_branch
-            if node.status == MemoryStatus.HISTORICAL:
-                self.db.save_memory(node)
-            else:
-                self.semantic.store(node)
-            restored_count += 1
+            validated_nodes.append(node)
 
         hp_data = snapshot.get("handover")
-        if hp_data:
-            pkt = HandoverPacket.model_validate(hp_data)
-            pkt.branch = target_branch
-            self.db.save_handover_packet(pkt)
+        validated_hp = HandoverPacket.model_validate(hp_data) if hp_data else None
+        if validated_hp:
+            validated_hp.branch = target_branch
 
-        # Record rollback commit pointing back to restored snapshot
+        # Save safety checkpoint before mutating state
+        self.commit(f"auto: pre-rollback checkpoint before {target_commit['id']}", branch=target_branch)
+
+        # Atomic branch state restoration
+        with self.db._lock:
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                """
+                DELETE FROM lineage_edges
+                WHERE child_id IN (SELECT id FROM memories WHERE branch = ? AND status != ?)
+                """,
+                (target_branch, MemoryStatus.TOMBSTONED.value),
+            )
+            cursor.execute(
+                "DELETE FROM memories WHERE branch = ? AND status != ?",
+                (target_branch, MemoryStatus.TOMBSTONED.value),
+            )
+            cursor.execute("DELETE FROM handover_packets WHERE branch = ?", (target_branch,))
+            self.db.conn.commit()
+
+            for node in validated_nodes:
+                # Preserve embeddings on BOTH active and historical nodes so as_of_time search works
+                self.semantic.store(node)
+            if validated_hp:
+                self.db.save_handover_packet(validated_hp)
+
         rollback_commit = self.commit(
             f"rollback to {target_commit['id']} ({target_commit['message']})",
             branch=target_branch,
@@ -270,20 +281,39 @@ class MemoryGitManager:
         self.db.log_audit_event(
             "MEMORY_ROLLED_BACK",
             target_id=target_commit["id"],
-            details={"branch": target_branch, "restored_count": restored_count, "new_head": rollback_commit.id},
+            details={"branch": target_branch, "restored_count": len(validated_nodes), "new_head": rollback_commit.id},
         )
         return rollback_commit
 
-    def _load_branch_base_values(self, branch_name: str) -> Dict[str, Any]:
-        """Loads key -> value/content snapshot from the branch's initial fork commit for 3-way diff."""
-        commits = self.db.list_commits(branch=branch_name, limit=200)
-        if not commits:
+    def _load_branch_base_values(self, src_name: str, tgt_name: str) -> Dict[str, Any]:
+        """Loads key -> value/content snapshot from the fork base commit for 3-way diff."""
+        src_rec = self.db.get_branch_record(src_name) or {}
+        tgt_rec = self.db.get_branch_record(tgt_name) or {}
+
+        commit_id = None
+        if src_rec.get("parent_branch") == tgt_name and src_rec.get("parent_commit_id"):
+            commit_id = src_rec["parent_commit_id"]
+        elif tgt_rec.get("parent_branch") == src_name and tgt_rec.get("parent_commit_id"):
+            commit_id = tgt_rec["parent_commit_id"]
+
+        snap_row = self.db.get_commit(commit_id) if commit_id else None
+        if not snap_row:
+            # Fallback to oldest commit in SQLite directly (unbounded by limit)
+            with self.db._lock:
+                row = self.db.conn.execute(
+                    "SELECT * FROM memory_commits WHERE branch = ? ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                    (src_name,),
+                ).fetchone()
+                snap_row = dict(row) if row else None
+
+        if not snap_row:
             return {}
-        base_commit = commits[-1]
+
         try:
-            snap = json.loads(base_commit["snapshot_json"])
+            snap = json.loads(snap_row["snapshot_json"])
         except Exception:
             return {}
+
         base_map: Dict[str, Any] = {}
         for raw in snap.get("memories", []):
             node = MemoryNode.model_validate(raw)
@@ -310,15 +340,18 @@ class MemoryGitManager:
             if n.status in (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT)
         ]
 
-        base_map = self._load_branch_base_values(src_name)
-        tgt_by_key: Dict[str, MemoryNode] = {_logical_key(n): n for n in tgt_nodes}
+        base_map = self._load_branch_base_values(src_name, tgt_name)
+        tgt_by_key: Dict[str, List[MemoryNode]] = {}
+        for tn in tgt_nodes:
+            tgt_by_key.setdefault(_logical_key(tn), []).append(tn)
+
         added_or_modified: List[Dict[str, Any]] = []
         conflicts: List[Dict[str, Any]] = []
 
         for snode in src_nodes:
             key = _logical_key(snode)
-            tnode = tgt_by_key.get(key)
-            if tnode is None:
+            t_matches = tgt_by_key.get(key, [])
+            if not t_matches:
                 added_or_modified.append({
                     "key": key,
                     "source_id": snode.id,
@@ -328,19 +361,32 @@ class MemoryGitManager:
                 })
                 continue
 
+            # If multiple CONFLICT rows exist on target for the same key, prefer newest write
+            tnode = max(t_matches, key=lambda n: (n.valid_from, n.created_at))
             s_val = snode.metadata.get("value")
             t_val = tnode.metadata.get("value")
-            if key.startswith("rel:") and s_val != t_val:
-                if key in base_map and base_map[key] == t_val:
-                    # Fast-forward relational update: only source changed since branching
+
+            if key.startswith("rel:"):
+                t_vals = {tn.metadata.get("value") for tn in t_matches}
+                if len(t_vals) == 1 and s_val == t_val:
+                    continue
+                if len(t_vals) == 1 and key in base_map and base_map[key] == s_val:
+                    # Only target changed since fork -> keep target cleanly
+                    continue
+                if len(t_vals) == 1 and key in base_map and base_map[key] == t_val:
                     added_or_modified.append({
                         "key": key,
                         "source_id": snode.id,
                         "target_id": tnode.id,
+                        "target_ids": [tn.id for tn in t_matches],
                         "content": snode.content,
                         "status": "modified",
                     })
                 else:
+                    if len(t_vals) > 1 and t_val == s_val:
+                        other = next((tn for tn in t_matches if tn.metadata.get("value") != s_val), tnode)
+                        tnode = other
+                        t_val = other.metadata.get("value")
                     conflicts.append({
                         "key": key,
                         "entity": snode.metadata.get("entity"),
@@ -349,9 +395,25 @@ class MemoryGitManager:
                         "target_value": t_val,
                         "source_id": snode.id,
                         "target_id": tnode.id,
+                        "target_ids": [tn.id for tn in t_matches],
                     })
-            elif not key.startswith("rel:") and snode.content != tnode.content:
-                if key in base_map and base_map[key] != tnode.content and base_map[key] != snode.content:
+            else:
+                t_contents = {tn.content for tn in t_matches}
+                if len(t_contents) == 1 and snode.content == tnode.content:
+                    continue
+                if len(t_contents) == 1 and key in base_map and base_map[key] == snode.content:
+                    # Source is still at ancestor content while target advanced -> keep target
+                    continue
+                if len(t_contents) == 1 and key in base_map and base_map[key] == tnode.content:
+                    added_or_modified.append({
+                        "key": key,
+                        "source_id": snode.id,
+                        "target_id": tnode.id,
+                        "target_ids": [tn.id for tn in t_matches],
+                        "content": snode.content,
+                        "status": "modified",
+                    })
+                else:
                     conflicts.append({
                         "key": key,
                         "entity": None,
@@ -360,14 +422,7 @@ class MemoryGitManager:
                         "target_value": tnode.content,
                         "source_id": snode.id,
                         "target_id": tnode.id,
-                    })
-                else:
-                    added_or_modified.append({
-                        "key": key,
-                        "source_id": snode.id,
-                        "target_id": tnode.id,
-                        "content": snode.content,
-                        "status": "modified",
+                        "target_ids": [tn.id for tn in t_matches],
                     })
 
         return {
@@ -410,7 +465,6 @@ class MemoryGitManager:
         applied = 0
         skipped_tombstoned: List[str] = []
 
-        # Apply non-conflicting additions/modifications
         for item in diff["added_or_modified"]:
             snode = src_nodes.get(item["source_id"])
             if not snode:
@@ -418,12 +472,12 @@ class MemoryGitManager:
             if self._is_tombstoned(snode.model_dump()):
                 skipped_tombstoned.append(snode.id)
                 continue
-            if item.get("target_id"):
-                self.db.update_memory_status(item["target_id"], MemoryStatus.HISTORICAL, valid_to=time.time())
+            target_ids = item.get("target_ids") or ([item["target_id"]] if item.get("target_id") else [])
+            for tid in target_ids:
+                self.db.update_memory_status(tid, MemoryStatus.HISTORICAL, valid_to=time.time())
             self._apply_node_to_branch(snode, tgt_name)
             applied += 1
 
-        # Apply conflict winners if strategy == 'theirs'
         if conflicts and strategy == "theirs":
             for conf in conflicts:
                 snode = src_nodes.get(conf["source_id"])
@@ -432,7 +486,9 @@ class MemoryGitManager:
                 if self._is_tombstoned(snode.model_dump()):
                     skipped_tombstoned.append(snode.id)
                     continue
-                self.db.update_memory_status(conf["target_id"], MemoryStatus.HISTORICAL, valid_to=time.time())
+                target_ids = conf.get("target_ids") or ([conf["target_id"]] if conf.get("target_id") else [])
+                for tid in target_ids:
+                    self.db.update_memory_status(tid, MemoryStatus.HISTORICAL, valid_to=time.time())
                 self._apply_node_to_branch(snode, tgt_name)
                 applied += 1
 
@@ -440,7 +496,7 @@ class MemoryGitManager:
         self.db.log_audit_event(
             "BRANCH_MERGED",
             target_id=tgt_name,
-            details={"source": src_name, "strategy": strategy, "applied": applied, "conflicts": len(conflicts)},
+            details={"source": src_name, "branch": tgt_name, "strategy": strategy, "applied": applied, "conflicts": len(conflicts)},
         )
         return MergeResult(
             source_branch=src_name,

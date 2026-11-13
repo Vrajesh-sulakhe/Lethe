@@ -155,3 +155,100 @@ def test_memory_git_branch_commit_merge_and_tombstone_invariant(tmp_path):
     with pytest.raises(ValueError):
         mem.rollback("nonexistent-commit")
     mem.close()
+
+
+def test_unlearning_scrubs_commits_audit_events_and_blocks_cross_branch_resurrection(tmp_path):
+    mem = LetheMemory(db_path=tmp_path / "scrub.db", procedures_dir=tmp_path / "procs")
+    mem.create_branch("exp", switch=True)
+    secret_exp = mem.store("Top secret token: xoxp-ultra-secret", category="secret")
+    mem.commit("recorded secret in exp commit")
+
+    # Merge exp -> main
+    mem.switch_branch("main")
+    res1 = mem.merge_branch("exp")
+    assert res1.applied_count == 1
+    main_nodes = [n for n in mem.db.list_memories(branch="main") if "xoxp-ultra-secret" in n.content]
+    assert len(main_nodes) == 1
+    main_secret_id = main_nodes[0].id
+
+    # Forget ONLY the merged copy on main
+    receipt = mem.forget(main_secret_id, reason="gdpr erasure")
+    assert receipt.purged_count >= 1
+
+    # 1. Plaintext secret must NOT remain in memory_commits.snapshot_json or audit_events.details_json
+    rows = mem.db.conn.execute("SELECT snapshot_json FROM memory_commits").fetchall()
+    for row in rows:
+        assert "xoxp-ultra-secret" not in row["snapshot_json"]
+    audit_rows = mem.db.conn.execute("SELECT details_json FROM audit_events").fetchall()
+    for arow in audit_rows:
+        assert "xoxp-ultra-secret" not in arow["details_json"]
+
+    # 2. Re-merging exp -> main must NOT resurrect the forgotten memory
+    res2 = mem.merge_branch("exp")
+    main_active = mem.db.list_memories(status=MemoryStatus.ACTIVE, branch="main")
+    assert all("xoxp-ultra-secret" not in m.content for m in main_active)
+    assert len(res2.skipped_tombstoned) >= 1
+
+    # 3. Deleting exp must NOT remove permanent unlearning tombstones
+    mem.delete_branch("exp")
+    tomb_count = mem.db.conn.execute("SELECT COUNT(*) FROM unlearning_tombstones").fetchone()[0]
+    assert tomb_count >= 1
+    mem.close()
+
+
+def test_three_way_merge_handover_isolation_and_historical_rollback(tmp_path):
+    mem = LetheMemory(db_path=tmp_path / "advanced_git.db", procedures_dir=tmp_path / "procs")
+    sem_node = mem.store("Architecture decision Alpha v1", category="arch", valid_from=1000.0)
+    mem.store("API uses REST v1", category="api", tier=StorageTier.RELATIONAL, valid_from=1000.0,
+              metadata={"entity": "api", "attribute": "style", "value": "REST"})
+    mem.store("API uses REST v1 note", category="api", valid_from=1000.0)
+    mem.export_handover("shared-task", "Main branch handover")
+    c_base = mem.commit("base main")
+
+    # Fork feat branch; update handover with SAME task_id -> main's handover must remain intact
+    mem.create_branch("feat", switch=True)
+    mem.export_handover("shared-task", "Feature branch handover")
+    assert mem.db.get_handover_packet("shared-task", branch="main").task_goal == "Main branch handover"
+    assert mem.db.get_handover_packet("shared-task", branch="feat").task_goal == "Feature branch handover"
+
+    # Supersede relational fact so it becomes HISTORICAL, then commit & mutate & rollback
+    mem.store("API uses GraphQL v2", category="api", tier=StorageTier.RELATIONAL, valid_from=2000.0,
+              metadata={"entity": "api", "attribute": "style", "value": "GraphQL"})
+    mem.store("Temporary feat note", category="notes", valid_from=2500.0)
+    c_mid = mem.commit("mid feat")
+    mem.store("Bad note after mid", category="notes", valid_from=3000.0)
+    mem.rollback("HEAD")  # resolves to head (c_mid) or c_mid
+    mem.rollback(c_mid.id)
+    # Historical embedding for as_of_time=1500.0 must still be searchable after rollback
+    old_hits = mem.semantic.search("REST", as_of_time=1500.0, branch="feat")
+    assert any("REST" in n.content for n, _ in old_hits)
+
+    # Dream candidates stay branch-isolated
+    feat_clusters = mem.get_dream_candidates(category="notes")
+    mem.switch_branch("main")
+    main_clusters = mem.get_dream_candidates(category="notes")
+    assert feat_clusters != [] or main_clusters == []
+    assert all("Temporary feat note" not in str(c) for c in main_clusters)
+
+    # Non-relational 3-way merge: modify sem_node ONLY on main; feat stayed at Alpha v1 -> must NOT overwrite Alpha v2!
+    mem.db.conn.execute("UPDATE memories SET content = ? WHERE id = ?", ("Architecture decision Alpha v2", sem_node.id))
+    mem.db.conn.commit()
+    merge_res = mem.merge_branch("feat", strategy="ours")
+    reloaded_main = mem.db.get_memory(sem_node.id)
+    assert reloaded_main.content == "Architecture decision Alpha v2"
+
+    # Divergent relational conflict resolved with strategy='theirs'
+    mem.store("API uses gRPC", category="api", tier=StorageTier.RELATIONAL, valid_from=2000.0,
+              metadata={"entity": "api", "attribute": "style", "value": "gRPC"})
+    theirs_res = mem.merge_branch("feat", strategy="theirs")
+    assert len(theirs_res.conflicts) == 1
+    assert "GraphQL" in mem.recall("api style", entity_filter="api.style").context_text
+
+    # Delete non-active branch succeeds; active branch delete fails
+    mem.switch_branch("feat")
+    with pytest.raises(ValueError):
+        mem.delete_branch("feat")
+    mem.switch_branch("main")
+    mem.delete_branch("feat")
+    assert all(b.name != "feat" for b in mem.list_branches())
+    mem.close()

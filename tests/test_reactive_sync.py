@@ -97,7 +97,7 @@ async def test_mcp_resources_tools_and_cross_process_subscription_bus(tmp_path):
         server._lethe_memory.close()
 
 
-def test_cli_branch_rollback_and_hook_inject(tmp_path, monkeypatch):
+def test_cli_branch_rollback_and_hook_inject(tmp_path):
     from lethe.cli import main as cli_main
 
     db_path = tmp_path / "cli_sync.db"
@@ -155,3 +155,71 @@ def test_install_client_hooks_idempotent_with_backup(tmp_path):
     assert (cursor_dir / "rules" / "lethe-sync.mdc").exists()
     cur2 = install_cursor_sync_rule(cursor_dir=cursor_dir)
     assert cur2["status"] == "already_configured"
+
+
+@pytest.mark.anyio
+async def test_reactive_sync_pagination_workspace_filtering_and_resource_reads(tmp_path):
+    from lethe.mcp.server import create_mcp_server, poll_db_changes_once
+    from lethe.models import StorageTier
+    from lethe.cli import main as cli_main
+
+    db_path = tmp_path / "adv_sync.db"
+    procs_dir = tmp_path / "procs"
+
+    mem_a = LetheMemory(
+        db_path=db_path,
+        procedures_dir=procs_dir,
+        workspace_id="ws_untrusted",
+        default_trust=False,
+    )
+    server = create_mcp_server(db_path=str(db_path), procedures_dir=str(procs_dir))
+    base_cursor = {
+        "last_data_version": mem_a.db.get_data_version(),
+        "last_audit_id": mem_a.db.get_max_audit_id(),
+    }
+
+    # Process B writes >55 events + a conflict + a handover in ws_private
+    mem_b = LetheMemory(db_path=db_path, procedures_dir=procs_dir, workspace_id="ws_private")
+    for i in range(58):
+        mem_b.store(f"Secret private ws event #{i}", category="arch", workspace_id="ws_private", scope="project")
+    mem_b.store("Auth is JWT", category="auth", tier=StorageTier.RELATIONAL, valid_from=1000.0,
+                workspace_id="ws_private", metadata={"entity": "auth", "attribute": "mode", "value": "JWT"})
+    mem_b.store("Auth is OAuth2", category="auth", tier=StorageTier.RELATIONAL, valid_from=1000.0,
+                workspace_id="ws_private", metadata={"entity": "auth", "attribute": "mode", "value": "OAuth2"})
+    mem_b.export_handover("task-60", "Finish OAuth2")
+    mem_b.close()
+
+    # Poll detects handover AND conflict even after >50 prior events
+    state = await poll_db_changes_once(server, mem_a, **base_cursor)
+    assert state["changed"] is True
+    assert "lethe://sync/latest" in state["published_uris"]
+    assert "lethe://handovers/active" in state["published_uris"]
+    assert "lethe://conflicts" in state["published_uris"]
+
+    # Untrusted ws_untrusted must NOT see ws_private project summaries in sync delta
+    delta = mem_a.get_sync_delta(client_id="claude", max_tokens=250)
+    assert "Secret private ws event" not in delta.formatted_text
+
+    # All 4 MCP resources can be read cleanly
+    for uri in ("lethe://sync/latest", "lethe://handovers/active", "lethe://branches", "lethe://conflicts"):
+        res = await server.read_resource(uri)
+        payload = json.loads(list(res)[0].content)
+        assert "active_branch" in payload
+
+    # lethe_branch MCP tool respects active branch (not hardcoded 'main')
+    await server.call_tool("lethe_branch", {"action": "create", "name": "parent-b", "switch": True})
+    await server.call_tool("lethe_branch", {"action": "create", "name": "child-b"})
+    branches_res = await server.read_resource("lethe://branches")
+    branches_payload = json.loads(list(branches_res)[0].content)
+    child_rec = next(b for b in branches_payload["branches"] if b["name"] == "child-b")
+    assert child_rec["parent_branch"] == "parent-b"
+
+    # CLI flag `lethe branch --json list` works cleanly
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli_main(["--db", str(db_path), "--procedures-dir", str(procs_dir), "branch", "--json", "list"])
+    assert rc == 0
+    assert json.loads(buf.getvalue())["active_branch"] == "parent-b"
+
+    mem_a.close()
+    server._lethe_memory.close()

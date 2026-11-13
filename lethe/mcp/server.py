@@ -181,6 +181,7 @@ def create_mcp_server(
             "content": node.content,
             "workspace_id": node.workspace_id,
             "scope": node.scope,
+            "branch": node.branch,
         }
         if node.code_anchor:
             payload["code_anchor"] = node.code_anchor.model_dump()
@@ -229,6 +230,7 @@ def create_mcp_server(
                 "task_id": packet.task_id,
                 "task_goal": packet.task_goal,
                 "active_memory_ids": packet.active_memory_ids,
+                "branch": packet.branch,
                 "created_at": packet.created_at,
             },
             indent=2,
@@ -291,6 +293,7 @@ def create_mcp_server(
                 "trust": m.trust_level,
                 "status": m.status.value,
                 "workspace_id": m.workspace_id,
+                "branch": m.branch,
                 "session": m.source_session,
             }
             for m in memories[:limit]
@@ -440,7 +443,7 @@ def create_mcp_server(
     def lethe_branch(
         action: str = "list",
         name: str = "",
-        target: str = "main",
+        target: Optional[str] = None,
         strategy: str = "abort_on_conflict",
         switch: bool = False,
     ) -> str:
@@ -453,7 +456,7 @@ def create_mcp_server(
                     "branches": [b.model_dump() for b in memory.list_branches()],
                 }, indent=2)
             if act == "create":
-                info = memory.create_branch(name=name, from_branch=target or None, switch=switch)
+                info = memory.create_branch(name=name, from_branch=target, switch=switch)
                 return json.dumps({"action": "BRANCH_CREATED", "branch": info.model_dump()}, indent=2)
             if act in ("switch", "checkout"):
                 info = memory.switch_branch(name)
@@ -462,7 +465,7 @@ def create_mcp_server(
                 diff = memory.diff_branches(source=name, target=target or "main")
                 return json.dumps(diff, indent=2)
             if act == "merge":
-                res = memory.merge_branch(source=name, target=target or None, strategy=strategy)
+                res = memory.merge_branch(source=name, target=target, strategy=strategy)
                 return json.dumps(res.model_dump(), indent=2)
             if act == "delete":
                 memory.delete_branch(name)
@@ -507,12 +510,11 @@ def create_mcp_server(
         with memory.db._lock:
             branch = memory.current_branch
             delta = memory.get_sync_delta(client_id="mcp_resource_peek", max_tokens=400, peek=True)
-            recent = memory.db.get_audit_events_since(max(0, delta.latest_audit_id - 15), limit=15)
         return json.dumps({
             "active_branch": branch,
             "latest_audit_id": delta.latest_audit_id,
             "summary_text": delta.formatted_text,
-            "recent_events": recent,
+            "recent_events": delta.events[-15:],
         }, indent=2)
 
     @server.resource(
@@ -605,7 +607,9 @@ async def poll_db_changes_once(
                     "last_audit_id": curr_audit_id,
                 },
             }
-        new_events = memory.db.get_audit_events_since(last_audit_id, limit=50)
+        batch_limit = 500
+        new_events = memory.db.get_audit_events_since(last_audit_id, limit=batch_limit)
+        next_audit_id = int(new_events[-1]["id"]) if new_events else curr_audit_id
 
     uris: List[str] = ["lethe://sync/latest"]
     for ev in new_events:
@@ -617,20 +621,26 @@ async def poll_db_changes_once(
                 uris.append("lethe://branches")
             if "lethe://handovers/active" not in uris:
                 uris.append("lethe://handovers/active")
-        elif etype == "MEMORY_CONFLICT" and "lethe://conflicts" not in uris:
+            if etype in ("MEMORY_ROLLED_BACK", "BRANCH_MERGED", "BRANCH_SWITCHED") and "lethe://conflicts" not in uris:
+                uris.append("lethe://conflicts")
+        elif etype in ("MEMORY_CONFLICT", "MEMORY_PURGED") and "lethe://conflicts" not in uris:
             uris.append("lethe://conflicts")
 
     bus = getattr(server, "_subscriptions", None)
-    if bus is not None:
+    publish_fn = getattr(bus, "publish", None) if bus is not None else None
+    if callable(publish_fn):
         for uri in uris:
-            await bus.publish(ResourceUpdated(uri=uri))
+            try:
+                await publish_fn(ResourceUpdated(uri=uri))
+            except Exception:
+                pass
 
     return {
         "changed": True,
         "published_uris": uris,
         "cursor": {
             "last_data_version": curr_data_version,
-            "last_audit_id": curr_audit_id,
+            "last_audit_id": next_audit_id,
         },
     }
 

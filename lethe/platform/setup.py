@@ -698,12 +698,15 @@ def install_claude_hooks(
 
     existing: Dict[str, Any] = {}
     if target.exists():
-        try:
-            loaded = json.loads(target.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        except Exception:
-            existing = {}
+        raw_text = target.read_text(encoding="utf-8")
+        if raw_text.strip():
+            try:
+                loaded = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Malformed JSON in {target}; refusing to overwrite hooks.") from exc
+            if not isinstance(loaded, dict):
+                raise ValueError(f"Expected JSON object in {target}; refusing to overwrite hooks.")
+            existing = loaded
 
     hooks = existing.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -721,7 +724,7 @@ def install_claude_hooks(
             isinstance(item, dict)
             and any(
                 isinstance(h, dict) and "lethe" in str(h.get("command", "")) and "hook inject" in str(h.get("command", ""))
-                for h in item.get("hooks", [])
+                for h in (item.get("hooks") or [])
             )
             for item in entries
         )

@@ -21,7 +21,6 @@ class TrustGateManager:
         self.db = db
 
     def process_input(self, node: MemoryNode) -> Dict[str, Any]:
-        cursor = self.db.conn.cursor()
         entity = node.metadata.get("entity")
         attribute = node.metadata.get("attribute")
 
@@ -34,47 +33,49 @@ class TrustGateManager:
                     is_suspicious = True
                     break
 
-        # 2. Check if this untrusted source attempts to overwrite a higher-trust existing fact in scope & branch
-        if entity and attribute:
-            query = """
-                SELECT * FROM memories
-                WHERE status = 'active'
-                  AND branch = ?
-                  AND json_extract(metadata_json, '$.entity') = ?
-                  AND json_extract(metadata_json, '$.attribute') = ?
-                  AND trust_level >= 0.8
-            """
-            params = [node.branch or "main", entity, attribute]
-            if node.workspace_id:
-                query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
-                params.append(node.workspace_id)
-            cursor.execute(query, params)
-            existing_high_trust = cursor.fetchone()
+        with self.db._lock:
+            cursor = self.db.conn.cursor()
+            # 2. Check if this untrusted source attempts to overwrite a higher-trust existing fact in scope & branch
+            if entity and attribute:
+                query = """
+                    SELECT * FROM memories
+                    WHERE status = 'active'
+                      AND branch = ?
+                      AND json_extract(metadata_json, '$.entity') = ?
+                      AND json_extract(metadata_json, '$.attribute') = ?
+                      AND trust_level >= 0.8
+                """
+                params = [node.branch or "main", entity, attribute]
+                if node.workspace_id:
+                    query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+                    params.append(node.workspace_id)
+                cursor.execute(query, params)
+                existing_high_trust = cursor.fetchone()
 
-            if existing_high_trust and node.trust_level < 0.5:
-                # Malicious or unauthorized overwrite attempt!
+                if existing_high_trust and node.trust_level < 0.5:
+                    # Malicious or unauthorized overwrite attempt!
+                    node.status = MemoryStatus.QUARANTINED
+                    self.db.save_memory(node)
+                    return {
+                        "allowed": False,
+                        "action": "QUARANTINED",
+                        "reason": f"Untrusted source '{node.source_origin}' (trust: {node.trust_level}) attempted to overwrite verified entity {entity}.{attribute}."
+                    }
+
+            if is_suspicious and node.trust_level < 0.5:
                 node.status = MemoryStatus.QUARANTINED
                 self.db.save_memory(node)
                 return {
                     "allowed": False,
                     "action": "QUARANTINED",
-                    "reason": f"Untrusted source '{node.source_origin}' (trust: {node.trust_level}) attempted to overwrite verified entity {entity}.{attribute}."
+                    "reason": f"Suspicious prompt injection signature detected from untrusted source '{node.source_origin}'."
                 }
 
-        if is_suspicious and node.trust_level < 0.5:
-            node.status = MemoryStatus.QUARANTINED
+            # Otherwise allowed
             self.db.save_memory(node)
             return {
-                "allowed": False,
-                "action": "QUARANTINED",
-                "reason": f"Suspicious prompt injection signature detected from untrusted source '{node.source_origin}'."
+                "allowed": True,
+                "action": "SAVED",
+                "reason": "Passed trust gate."
             }
-
-        # Otherwise allowed
-        self.db.save_memory(node)
-        return {
-            "allowed": True,
-            "action": "SAVED",
-            "reason": "Passed trust gate."
-        }
 

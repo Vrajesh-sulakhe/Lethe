@@ -168,7 +168,13 @@ class LetheMemory:
             self.db.log_audit_event(
                 "MEMORY_QUARANTINED",
                 target_id=node.id,
-                details={"branch": target_branch, "category": category, "reason": verdict.get("reason", "")},
+                details={
+                    "branch": target_branch,
+                    "category": category,
+                    "workspace_id": resolved_workspace,
+                    "scope": scope,
+                    "reason": verdict.get("reason", ""),
+                },
             )
             return node
 
@@ -203,6 +209,8 @@ class LetheMemory:
                 "branch": target_branch,
                 "category": category,
                 "tier": tier.value if isinstance(tier, StorageTier) else str(tier),
+                "workspace_id": resolved_workspace,
+                "scope": scope,
                 "summary": content[:140],
                 "conflicts": len(conflicts),
             },
@@ -626,11 +634,11 @@ class LetheMemory:
         )
         return packet
 
-    def import_handover(self, task_id: str) -> Optional[HandoverPacket]:
+    def import_handover(self, task_id: str, branch: Optional[str] = None) -> Optional[HandoverPacket]:
         """
         Restores mid-task state for a secondary agent.
         """
-        return self.db.get_handover_packet(task_id)
+        return self.db.get_handover_packet(task_id, branch=branch or self.current_branch)
 
     def get_dream_candidates(
         self,
@@ -644,6 +652,7 @@ class LetheMemory:
             category=category,
             workspace_id=resolved_ws,
             min_cluster_size=min_cluster_size,
+            branch=self.current_branch,
         )
 
     def consolidate(
@@ -662,11 +671,16 @@ class LetheMemory:
         Optionally marks parents as HISTORICAL to conserve token budget while
         preserving 100% cascading unlearning compliance.
         """
+        active_branch = self.current_branch
         valid_parents = []
         inferred_category = category
         for pid in parent_ids:
             parent_node = self.db.get_memory(pid)
-            if parent_node and parent_node.status in (MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL):
+            if (
+                parent_node
+                and parent_node.branch == active_branch
+                and parent_node.status in (MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL)
+            ):
                 valid_parents.append(parent_node)
                 if not inferred_category:
                     inferred_category = parent_node.category
@@ -795,15 +809,36 @@ class LetheMemory:
         active_branch = self.current_branch
         cursor = self.db.get_sync_cursor(client_id)
         last_id = int(cursor.get("last_audit_id", 0))
-        events = self.db.get_audit_events_since(last_id, limit=50)
+        batch_limit = 500
+        raw_events = self.db.get_audit_events_since(last_id, limit=batch_limit)
         latest_id = self.db.get_max_audit_id()
+        cursor_target_id = (
+            int(raw_events[-1]["id"])
+            if len(raw_events) >= batch_limit
+            else latest_id
+        )
+
+        is_trusted = self.security.is_workspace_trusted(self.workspace_id)
+        if not is_trusted:
+            events: List[Dict[str, Any]] = []
+            for ev in raw_events:
+                details = ev.get("details") or {}
+                ev_ws = details.get("workspace_id")
+                ev_scope = details.get("scope")
+                if ev_ws is not None and ev_ws != self.workspace_id and ev_scope != "global":
+                    continue
+                events.append(ev)
+        else:
+            events = raw_events
 
         if not events:
+            if not peek and cursor_target_id > last_id:
+                self.db.update_sync_cursor(client_id, last_audit_id=cursor_target_id, branch=active_branch)
             return SyncDelta(
                 client_id=client_id,
                 branch=active_branch,
                 last_audit_id=last_id,
-                latest_audit_id=latest_id,
+                latest_audit_id=cursor_target_id,
                 events=[],
                 active_handover=None,
                 token_count=0,
@@ -820,13 +855,13 @@ class LetheMemory:
         tokens = count_tokens(formatted) if formatted else 0
 
         if not peek:
-            self.db.update_sync_cursor(client_id, last_audit_id=latest_id, branch=active_branch)
+            self.db.update_sync_cursor(client_id, last_audit_id=cursor_target_id, branch=active_branch)
 
         return SyncDelta(
             client_id=client_id,
             branch=active_branch,
             last_audit_id=last_id,
-            latest_audit_id=latest_id,
+            latest_audit_id=cursor_target_id,
             events=events,
             active_handover=active_hp,
             token_count=tokens,

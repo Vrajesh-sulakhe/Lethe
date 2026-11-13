@@ -23,6 +23,7 @@ class MemorySynthesizer:
         workspace_id: Optional[str] = None,
         min_cluster_size: int = 2,
         max_clusters: int = 10,
+        branch: str = "main",
     ) -> List[Dict[str, Any]]:
         """
         Scans active atomic memories and groups them into thematic clusters based on
@@ -32,6 +33,7 @@ class MemorySynthesizer:
             category=category,
             status=MemoryStatus.ACTIVE,
             workspace_id=workspace_id,
+            branch=branch,
         )
 
         # Filter for atomic memories (exclude tombstoned or already heavily derived nodes)
