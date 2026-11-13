@@ -44,6 +44,7 @@ class MemoryNode(BaseModel):
     parent_ids: List[str] = Field(default_factory=list)  # Lineage DAG links
     workspace_id: Optional[str] = None                   # Scoped project/repo identifier
     scope: str = "project"                                # 'project' or 'global'
+    branch: str = "main"                                  # Memory Git branch name
     code_anchor: Optional[CodeAnchor] = None             # Decision-to-code drift anchor
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -63,6 +64,7 @@ class HandoverPacket(BaseModel):
     active_memory_ids: List[str]
     epistemic_state: Dict[str, Any] = Field(default_factory=dict)
     last_tool_trace: List[Dict[str, Any]] = Field(default_factory=list)
+    branch: str = "main"
     created_at: float = Field(default_factory=time.time)
 
 class DeletionReceipt(BaseModel):
@@ -71,4 +73,37 @@ class DeletionReceipt(BaseModel):
     purged_count: int
     verification_hash: str
     timestamp: float = Field(default_factory=time.time)
+
+class BranchInfo(BaseModel):
+    name: str
+    parent_branch: Optional[str] = None
+    head_commit_id: Optional[str] = None
+    created_at: float = Field(default_factory=time.time)
+    description: str = ""
+
+class MemoryCommit(BaseModel):
+    id: str
+    branch: str
+    parent_commit_id: Optional[str] = None
+    message: str
+    snapshot_json: str
+    created_at: float = Field(default_factory=time.time)
+
+class MergeResult(BaseModel):
+    source_branch: str
+    target_branch: str
+    applied_count: int = 0
+    conflicts: List[Dict[str, Any]] = Field(default_factory=list)
+    skipped_tombstoned: List[str] = Field(default_factory=list)
+    commit_id: Optional[str] = None
+
+class SyncDelta(BaseModel):
+    client_id: str
+    branch: str
+    last_audit_id: int
+    latest_audit_id: int
+    events: List[Dict[str, Any]] = Field(default_factory=list)
+    active_handover: Optional[HandoverPacket] = None
+    token_count: int = 0
+    formatted_text: str = ""
 

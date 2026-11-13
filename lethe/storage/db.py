@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from lethe.models import MemoryNode, MemoryStatus, StorageTier, HandoverPacket, CodeAnchor
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def get_current_workspace_id(start_path: Path | str = ".") -> str:
@@ -81,20 +81,24 @@ class DatabaseManager:
                 parent_ids_json TEXT NOT NULL DEFAULT '[]',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 workspace_id TEXT,
-                scope TEXT NOT NULL DEFAULT 'project'
+                scope TEXT NOT NULL DEFAULT 'project',
+                branch TEXT NOT NULL DEFAULT 'main'
             );
         """)
 
-        # Migration: ensure workspace_id and scope columns exist
+        # Migration: ensure workspace_id, scope, and branch columns exist
         cursor.execute("PRAGMA table_info(memories);")
         columns = [row["name"] for row in cursor.fetchall()]
         if "workspace_id" not in columns:
             cursor.execute("ALTER TABLE memories ADD COLUMN workspace_id TEXT;")
         if "scope" not in columns:
             cursor.execute("ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';")
+        if "branch" not in columns:
+            cursor.execute("ALTER TABLE memories ADD COLUMN branch TEXT NOT NULL DEFAULT 'main';")
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_workspace ON memories(workspace_id);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_branch_status ON memories(branch, status);")
 
         # Lineage DAG edges table
         cursor.execute("""
@@ -122,7 +126,59 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS handover_packets (
                 task_id TEXT PRIMARY KEY,
                 packet_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main'
+            );
+        """)
+        cursor.execute("PRAGMA table_info(handover_packets);")
+        hp_columns = [row["name"] for row in cursor.fetchall()]
+        if "branch" not in hp_columns:
+            cursor.execute("ALTER TABLE handover_packets ADD COLUMN branch TEXT NOT NULL DEFAULT 'main';")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_handover_branch_created ON handover_packets(branch, created_at);")
+
+        # Memory Git branches table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_branches (
+                name TEXT PRIMARY KEY,
+                parent_branch TEXT,
+                head_commit_id TEXT,
+                created_at REAL NOT NULL,
+                description TEXT NOT NULL DEFAULT ''
+            );
+        """)
+        cursor.execute("""
+            INSERT OR IGNORE INTO memory_branches (name, parent_branch, head_commit_id, created_at, description)
+            VALUES ('main', NULL, NULL, ?, 'Default memory branch')
+        """, (time.time(),))
+
+        # Memory Git commits (snapshots) table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_commits (
+                id TEXT PRIMARY KEY,
+                branch TEXT NOT NULL,
+                parent_commit_id TEXT,
+                message TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
                 created_at REAL NOT NULL
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_commits_branch_created ON memory_commits(branch, created_at);")
+
+        # Reactive sync global state & per-client delivery cursors
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+        cursor.execute("INSERT OR IGNORE INTO sync_state (key, value) VALUES ('active_branch', 'main');")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sync_cursors (
+                client_id TEXT PRIMARY KEY,
+                last_audit_id INTEGER NOT NULL DEFAULT 0,
+                branch TEXT NOT NULL DEFAULT 'main',
+                updated_at REAL NOT NULL
             );
         """)
 
@@ -275,8 +331,8 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO memories (
                     id, content, category, tier, trust_level, status,
                     source_session, source_origin, created_at, valid_from, valid_to,
-                    parent_ids_json, metadata_json, workspace_id, scope
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_ids_json, metadata_json, workspace_id, scope, branch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 node.id,
                 node.content,
@@ -293,6 +349,7 @@ class DatabaseManager:
                 json.dumps(node.metadata),
                 node.workspace_id,
                 node.scope or "project",
+                node.branch or "main",
             ))
 
             # Register lineage edges for parent_ids
@@ -327,11 +384,16 @@ class DatabaseManager:
         tier: Optional[StorageTier] = None,
         session_id: Optional[str] = None,
         is_trusted: bool = True,
+        branch: Optional[str] = None,
     ) -> List[MemoryNode]:
         with self._lock:
             cursor = self.conn.cursor()
             query = "SELECT * FROM memories WHERE 1=1"
             params: List[Any] = []
+
+            if branch is not None:
+                query += " AND branch = ?"
+                params.append(branch)
 
             if category:
                 query += " AND category = ?"
@@ -417,13 +479,14 @@ class DatabaseManager:
         workspace_id: Optional[str] = None,
         as_of_time: Optional[float] = None,
         is_trusted: bool = True,
+        branch: Optional[str] = "main",
     ) -> List[Dict[str, Any]]:
         with self._lock:
             cursor = self.conn.cursor()
             if as_of_time is not None:
                 query = """
                     SELECT e.memory_id, e.vector_json, m.content, m.category, m.tier,
-                           m.trust_level, m.status, m.source_session, m.workspace_id, m.scope
+                           m.trust_level, m.status, m.source_session, m.workspace_id, m.scope, m.branch
                     FROM embeddings e
                     JOIN memories m ON e.memory_id = m.id
                     WHERE m.status IN ('active', 'conflict', 'historical')
@@ -434,12 +497,16 @@ class DatabaseManager:
             else:
                 query = """
                     SELECT e.memory_id, e.vector_json, m.content, m.category, m.tier,
-                           m.trust_level, m.status, m.source_session, m.workspace_id, m.scope
+                           m.trust_level, m.status, m.source_session, m.workspace_id, m.scope, m.branch
                     FROM embeddings e
                     JOIN memories m ON e.memory_id = m.id
                     WHERE m.status IN ('active', 'conflict')
                 """
                 params = []
+
+            if branch is not None:
+                query += " AND m.branch = ?"
+                params.append(branch)
 
             if workspace_id:
                 if is_trusted:
@@ -465,6 +532,7 @@ class DatabaseManager:
                     "source_session": r["source_session"] if "source_session" in keys else "default_session",
                     "workspace_id": r["workspace_id"] if "workspace_id" in keys else None,
                     "scope": r["scope"] if "scope" in keys else "project",
+                    "branch": r["branch"] if "branch" in keys and r["branch"] else "main",
                 })
             return results
 
@@ -472,19 +540,240 @@ class DatabaseManager:
         with self._lock:
             cursor = self.conn.cursor()
             cursor.execute("""
-                INSERT OR REPLACE INTO handover_packets (task_id, packet_json, created_at)
-                VALUES (?, ?, ?)
-            """, (packet.task_id, packet.model_dump_json(), packet.created_at))
+                INSERT OR REPLACE INTO handover_packets (task_id, packet_json, created_at, branch)
+                VALUES (?, ?, ?, ?)
+            """, (packet.task_id, packet.model_dump_json(), packet.created_at, packet.branch or "main"))
             self.conn.commit()
 
     def get_handover_packet(self, task_id: str) -> Optional[HandoverPacket]:
         with self._lock:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT packet_json FROM handover_packets WHERE task_id = ?", (task_id,))
+            cursor.execute("SELECT packet_json, branch FROM handover_packets WHERE task_id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 return None
-            return HandoverPacket.model_validate_json(row["packet_json"])
+            pkt = HandoverPacket.model_validate_json(row["packet_json"])
+            if "branch" in row.keys() and row["branch"]:
+                pkt.branch = row["branch"]
+            return pkt
+
+    def get_latest_handover_packet(self, branch: Optional[str] = None) -> Optional[HandoverPacket]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            target_branch = branch or self.get_active_branch()
+            cursor.execute(
+                "SELECT packet_json, branch FROM handover_packets WHERE branch = ? ORDER BY created_at DESC LIMIT 1",
+                (target_branch,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            pkt = HandoverPacket.model_validate_json(row["packet_json"])
+            pkt.branch = row["branch"] or target_branch
+            return pkt
+
+    # --- Memory Git & Reactive Sync Helpers ---
+
+    def get_active_branch(self) -> str:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT value FROM sync_state WHERE key = 'active_branch'")
+            row = cursor.fetchone()
+            return str(row["value"]) if row and row["value"] else "main"
+
+    def set_active_branch(self, name: str) -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('active_branch', ?)",
+                (name,),
+            )
+            self.conn.commit()
+
+    def create_branch_record(
+        self,
+        name: str,
+        parent_branch: Optional[str] = None,
+        head_commit_id: Optional[str] = None,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO memory_branches (name, parent_branch, head_commit_id, created_at, description)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, parent_branch, head_commit_id, now, description),
+            )
+            self.conn.commit()
+            return {
+                "name": name,
+                "parent_branch": parent_branch,
+                "head_commit_id": head_commit_id,
+                "created_at": now,
+                "description": description,
+            }
+
+    def get_branch_record(self, name: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM memory_branches WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def list_branches(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM memory_branches ORDER BY created_at ASC")
+            return [dict(r) for r in cursor.fetchall()]
+
+    def update_branch_head(self, name: str, commit_id: Optional[str]) -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE memory_branches SET head_commit_id = ? WHERE name = ?",
+                (commit_id, name),
+            )
+            self.conn.commit()
+
+    def delete_branch_record(self, name: str) -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM memories WHERE branch = ?", (name,))
+            cursor.execute("DELETE FROM handover_packets WHERE branch = ?", (name,))
+            cursor.execute("DELETE FROM memory_commits WHERE branch = ?", (name,))
+            cursor.execute("DELETE FROM memory_branches WHERE name = ?", (name,))
+            self.conn.commit()
+
+    def save_commit(
+        self,
+        commit_id: str,
+        branch: str,
+        parent_commit_id: Optional[str],
+        message: str,
+        snapshot_json: str,
+        created_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        ts = float(created_at if created_at is not None else time.time())
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO memory_commits (id, branch, parent_commit_id, message, snapshot_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (commit_id, branch, parent_commit_id, message, snapshot_json, ts),
+            )
+            cursor.execute(
+                "UPDATE memory_branches SET head_commit_id = ? WHERE name = ?",
+                (commit_id, branch),
+            )
+            self.conn.commit()
+            return {
+                "id": commit_id,
+                "branch": branch,
+                "parent_commit_id": parent_commit_id,
+                "message": message,
+                "snapshot_json": snapshot_json,
+                "created_at": ts,
+            }
+
+    def get_commit(self, commit_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM memory_commits WHERE id = ?", (commit_id,))
+            row = cursor.fetchone()
+            if not row and len(commit_id) >= 4:
+                cursor.execute("SELECT * FROM memory_commits WHERE id LIKE ? LIMIT 2", (f"{commit_id}%",))
+                matches = cursor.fetchall()
+                if len(matches) == 1:
+                    row = matches[0]
+            return dict(row) if row else None
+
+    def list_commits(self, branch: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            if branch is not None:
+                cursor.execute(
+                    "SELECT * FROM memory_commits WHERE branch = ? ORDER BY created_at DESC LIMIT ?",
+                    (branch, limit),
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM memory_commits ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_data_version(self) -> int:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA data_version;")
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    def get_max_audit_id(self) -> int:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM audit_events;")
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    def get_audit_events_since(self, since_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, event_type, target_id, details_json, created_at
+                FROM audit_events
+                WHERE id > ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (int(since_id), int(limit)),
+            )
+            results: List[Dict[str, Any]] = []
+            for row in cursor.fetchall():
+                try:
+                    details = json.loads(row["details_json"]) if row["details_json"] else {}
+                except Exception:
+                    details = {}
+                results.append({
+                    "id": int(row["id"]),
+                    "event_type": row["event_type"],
+                    "target_id": row["target_id"],
+                    "details": details,
+                    "created_at": float(row["created_at"]),
+                })
+            return results
+
+    def get_sync_cursor(self, client_id: str) -> Dict[str, Any]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM sync_cursors WHERE client_id = ?", (client_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return {
+                "client_id": client_id,
+                "last_audit_id": 0,
+                "branch": self.get_active_branch(),
+                "updated_at": 0.0,
+            }
+
+    def update_sync_cursor(self, client_id: str, last_audit_id: int, branch: str = "main") -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO sync_cursors (client_id, last_audit_id, branch, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (client_id, int(last_audit_id), branch, time.time()),
+            )
+            self.conn.commit()
 
     def _row_to_node(self, row: sqlite3.Row) -> MemoryNode:
         keys = row.keys()
@@ -511,6 +800,7 @@ class DatabaseManager:
             parent_ids=json.loads(row["parent_ids_json"]),
             workspace_id=row["workspace_id"] if "workspace_id" in keys else None,
             scope=row["scope"] if "scope" in keys and row["scope"] else "project",
+            branch=row["branch"] if "branch" in keys and row["branch"] else "main",
             code_anchor=code_anchor,
             metadata=meta,
         )
