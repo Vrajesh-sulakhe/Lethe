@@ -5,16 +5,24 @@ and real-time developer observability.
 """
 
 from lethe.platform.setup import (
+    build_mcp_credentials,
     configure_tool,
     detect_installed_tools,
+    format_mcp_credentials,
     generate_mcp_config,
+    get_default_db_path,
+    get_default_procedures_dir,
     setup_all_tools,
 )
 
 __all__ = [
-    "detect_installed_tools",
-    "generate_mcp_config",
+    "build_mcp_credentials",
     "configure_tool",
+    "detect_installed_tools",
+    "format_mcp_credentials",
+    "generate_mcp_config",
+    "get_default_db_path",
+    "get_default_procedures_dir",
     "setup_all_tools",
 ]
 

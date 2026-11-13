@@ -1,27 +1,52 @@
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 from lethe.core.engine import LetheMemory
 from lethe.models import MemoryStatus, StorageTier
+from lethe.platform.setup import (
+    build_mcp_credentials,
+    format_mcp_credentials,
+    get_default_db_path,
+    get_default_procedures_dir,
+)
+
+
+@contextmanager
+def _open_memory(
+    args,
+    procedures_dir: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+):
+    """Opens LetheMemory for a CLI command and guarantees clean close on exit or error."""
+    memory = LetheMemory(
+        db_path=args.db,
+        procedures_dir=procedures_dir or args.procedures_dir,
+        workspace_id=workspace_id,
+    )
+    try:
+        yield memory
+    finally:
+        memory.close()
 
 
 def cmd_inspect(args):
-    memory = LetheMemory(db_path=args.db, procedures_dir=args.procedures_dir)
     target_status = MemoryStatus(args.status) if getattr(args, "status", None) else None
     target_tier = StorageTier(args.tier) if getattr(args, "tier", None) else None
-    memories = memory.db.list_memories(
-        status=target_status,
-        workspace_id=getattr(args, "workspace", None),
-        tier=target_tier,
-    )
+    with _open_memory(args) as memory:
+        memories = memory.db.list_memories(
+            status=target_status,
+            workspace_id=getattr(args, "workspace", None),
+            tier=target_tier,
+        )
     print("=" * 80)
     print(f" LETHE MEMORY INSPECTOR — Total Records: {len(memories)}")
     print("=" * 80)
     if not memories:
         print(" [No memories stored yet.]")
-        memory.close()
         return
 
     for m in memories:
@@ -35,30 +60,35 @@ def cmd_inspect(args):
         if m.parent_ids:
             print(f"  Lineage: Derived from parents {m.parent_ids}")
         print("-" * 80)
-    memory.close()
 
 
 def cmd_store(args):
-    memory = LetheMemory(
-        db_path=args.db,
-        procedures_dir=args.procedures_dir,
-        workspace_id=args.workspace,
-    )
+    rel_fields = (args.entity, args.attribute, args.value)
+    if any(v is not None for v in rel_fields) and not (
+        args.entity and args.attribute and args.value is not None
+    ):
+        print(
+            "Error: --entity, --attribute, and --value must all be provided together.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     metadata = {}
     if args.entity and args.attribute and args.value is not None:
         metadata = {"entity": args.entity, "attribute": args.attribute, "value": args.value}
 
-    node = memory.store(
-        content=args.content,
-        category=args.category,
-        tier=StorageTier(args.tier),
-        source=args.source,
-        session_id=args.session,
-        workspace_id=args.workspace,
-        scope=args.scope,
-        valid_from=args.valid_from,
-        metadata=metadata,
-    )
+    with _open_memory(args, workspace_id=args.workspace) as memory:
+        node = memory.store(
+            content=args.content,
+            category=args.category,
+            tier=StorageTier(args.tier),
+            source=args.source,
+            session_id=args.session,
+            workspace_id=args.workspace,
+            scope=args.scope,
+            valid_from=args.valid_from,
+            metadata=metadata,
+        )
     print(
         json.dumps(
             {
@@ -72,24 +102,19 @@ def cmd_store(args):
             indent=2,
         )
     )
-    memory.close()
 
 
 def cmd_recall(args):
-    memory = LetheMemory(
-        db_path=args.db,
-        procedures_dir=args.procedures_dir,
-        workspace_id=args.workspace,
-    )
-    res = memory.recall(
-        query=args.query,
-        token_budget=args.budget,
-        as_of_time=args.as_of,
-        entity_filter=args.entity,
-        workspace_id=args.workspace,
-        session_id=args.session,
-        model_name=args.model,
-    )
+    with _open_memory(args, workspace_id=args.workspace) as memory:
+        res = memory.recall(
+            query=args.query,
+            token_budget=args.budget,
+            as_of_time=args.as_of,
+            entity_filter=args.entity,
+            workspace_id=args.workspace,
+            session_id=args.session,
+            model_name=args.model,
+        )
     print("=" * 80)
     print(
         f" LETHE RECALL | Tokens Used: {res.tokens_used}/{args.budget} | "
@@ -101,56 +126,55 @@ def cmd_recall(args):
         print("\nConflicts:")
         for c in res.conflicts_detected:
             print(f"  - {c}")
-    memory.close()
 
 
 def cmd_procedures(args):
     proc_dir = getattr(args, "dir", None) or args.procedures_dir
-    memory = LetheMemory(db_path=args.db, procedures_dir=proc_dir)
     action = args.proc_action
 
-    if action == "list":
-        files = memory.list_procedures()
-        if not files:
-            print("No procedures found.")
-        else:
-            for name in files:
-                print(f"- {name}")
-    elif action == "read":
-        content = memory.read_procedure(args.filename)
-        if content is None:
-            print(f"Error: Procedure '{args.filename}' not found.", file=sys.stderr)
-            memory.close()
-            sys.exit(1)
-        print(content)
-    elif action == "write":
-        content = args.content
-        if args.file:
-            content = Path(args.file).read_text(encoding="utf-8")
-        if content is None:
-            print("Error: Provide --content or --file.", file=sys.stderr)
-            memory.close()
-            sys.exit(1)
-        saved = memory.save_procedure(args.filename, content)
-        print(f"Saved procedure: {saved}")
-    memory.close()
+    with _open_memory(args, procedures_dir=proc_dir) as memory:
+        if action == "list":
+            files = memory.list_procedures()
+            if not files:
+                print("No procedures found.")
+            else:
+                for name in files:
+                    print(f"- {name}")
+        elif action == "read":
+            content = memory.read_procedure(args.filename)
+            if content is None:
+                print(f"Error: Procedure '{args.filename}' not found.", file=sys.stderr)
+                sys.exit(1)
+            print(content)
+        elif action == "write":
+            content = args.content
+            if args.file:
+                try:
+                    content = Path(args.file).read_text(encoding="utf-8")
+                except OSError as exc:
+                    print(f"Error reading '{args.file}': {exc}", file=sys.stderr)
+                    sys.exit(1)
+            if content is None:
+                print("Error: Provide --content or --file.", file=sys.stderr)
+                sys.exit(1)
+            saved = memory.save_procedure(args.filename, content)
+            print(f"Saved procedure: {saved}")
 
 
 def cmd_flush_ephemeral(args):
-    memory = LetheMemory(db_path=args.db, procedures_dir=args.procedures_dir)
-    info = memory.flush_ephemeral(
-        session_id=args.session,
-        workspace_id=args.workspace,
-        promote_summary=args.promote_summary,
-    )
+    with _open_memory(args) as memory:
+        info = memory.flush_ephemeral(
+            session_id=args.session,
+            workspace_id=args.workspace,
+            promote_summary=args.promote_summary,
+        )
     print(json.dumps(info, indent=2))
-    memory.close()
 
 
 def cmd_forget(args):
-    memory = LetheMemory(db_path=args.db, procedures_dir=args.procedures_dir)
     print(f"Initiating verifiable cascading unlearning for: '{args.target}'...")
-    receipt = memory.forget(args.target, workspace_id=getattr(args, "workspace", None))
+    with _open_memory(args) as memory:
+        receipt = memory.forget(args.target, workspace_id=getattr(args, "workspace", None))
     print("=" * 80)
     print(" DELETION RECEIPT (CRYPTOGRAPHIC AUDIT PROOF)")
     print("=" * 80)
@@ -164,7 +188,6 @@ def cmd_forget(args):
         print(" Status: SUCCESS — 100% permanently eradicated.")
     else:
         print(" Status: NOT FOUND — zero records modified.")
-    memory.close()
 
 
 def cmd_demo(args):
@@ -179,6 +202,20 @@ def cmd_benchmark(args):
 
 def cmd_setup(args):
     from lethe.platform.setup import detect_installed_tools, setup_all_tools
+
+    resolved_db = os.path.abspath(os.path.expanduser(args.db))
+    resolved_procs = os.path.abspath(os.path.expanduser(args.procedures_dir))
+    use_wrapper = getattr(args, "use_wrapper", False)
+
+    if getattr(args, "print_creds", False):
+        print(
+            format_mcp_credentials(
+                db_path=resolved_db,
+                procedures_dir=resolved_procs,
+                use_wrapper=use_wrapper,
+            )
+        )
+        return
 
     print("=" * 80)
     print(" LETHE CROSS-TOOL INTEGRATION HUB: ZERO-CONFIG SETUP")
@@ -196,29 +233,72 @@ def cmd_setup(args):
             status = (
                 "YES (Connected)"
                 if info["is_configured"]
-                else ("Ready to wire" if info["exists"] else "Not installed")
+                else ("Ready to wire" if info["exists"] else "Will create")
             )
             print(f" {name:<15} | {path_str:<42} | {status}")
         print("=" * 80)
-        print("Run 'lethe setup' without --check to automatically wire detected tools.")
+        print("Run 'lethe setup' to wire tools, or 'lethe creds' to copy-paste MCP credentials.")
         return
 
     tools_to_wire = [args.tool] if args.tool != "all" else None
     results = setup_all_tools(
         tools=tools_to_wire,
-        db_path=os.path.abspath(os.path.expanduser(args.db)),
-        procedures_dir=os.path.abspath(os.path.expanduser(args.procedures_dir)),
-        use_wrapper=getattr(args, "use_wrapper", False),
+        db_path=resolved_db,
+        procedures_dir=resolved_procs,
+        use_wrapper=use_wrapper,
     )
 
-    print(f"\nSuccessfully configured {len(results)} tool integrations:\n")
+    print(f"\nSuccessfully configured {len(results)} tool integrations (shared vault: {resolved_db}):\n")
     for r in results:
         print(f" [✓] {r['tool'].upper():<12} -> {r['path']}")
 
     print("=" * 80)
     print(" All selected tools are now wired to Lethe's universal MCP memory bus!")
-    print(" Open Cursor, Claude Code, or Antigravity and start working seamlessly.")
+    print(" Open Cursor, Claude Code, Antigravity, Codex, or VS Code and restart/reload MCP.")
     print("=" * 80)
+
+
+def cmd_creds(args):
+    resolved_db = os.path.abspath(os.path.expanduser(args.db))
+    resolved_procs = os.path.abspath(os.path.expanduser(args.procedures_dir))
+    use_wrapper = getattr(args, "use_wrapper", False)
+
+    if getattr(args, "json", False):
+        creds = build_mcp_credentials(
+            db_path=resolved_db,
+            procedures_dir=resolved_procs,
+            use_wrapper=use_wrapper,
+        )
+        print(json.dumps(creds, indent=2))
+        return
+
+    print(
+        format_mcp_credentials(
+            db_path=resolved_db,
+            procedures_dir=resolved_procs,
+            use_wrapper=use_wrapper,
+        )
+    )
+
+
+def cmd_mcp(args):
+    from lethe.mcp.server import run_mcp_server
+
+    if getattr(args, "check_only", False):
+        with _open_memory(args) as memory:
+            health = memory.check_health()
+        print(json.dumps(health, indent=2))
+        if not health.get("healthy", False):
+            sys.exit(1)
+        return
+
+    run_mcp_server(
+        db_path=args.db,
+        procedures_dir=args.procedures_dir,
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+    )
 
 
 def cmd_ui(args):
@@ -233,11 +313,8 @@ def cmd_ui(args):
 
 
 def cmd_health(args):
-    memory = LetheMemory(db_path=args.db, procedures_dir=args.procedures_dir)
-    try:
+    with _open_memory(args) as memory:
         health = memory.check_health()
-    finally:
-        memory.close()
 
     if getattr(args, "json", False):
         print(json.dumps(health, indent=2))
@@ -265,8 +342,8 @@ def main():
         prog="lethe",
         description="Lethe: Autonomous Agent Memory Operating System",
     )
-    parser.add_argument("--db", default="lethe.db", help="Path to SQLite database")
-    parser.add_argument("--procedures-dir", default="procedures", help="Directory for Markdown runbooks")
+    parser.add_argument("--db", default=get_default_db_path(), help="Path to SQLite database (default: ~/.lethe/lethe.db)")
+    parser.add_argument("--procedures-dir", default=get_default_procedures_dir(), help="Directory for Markdown runbooks (default: ~/.lethe/procedures)")
 
     # Allow --db and --procedures-dir either before or after the subcommand
     common = argparse.ArgumentParser(add_help=False)
@@ -286,6 +363,11 @@ def main():
     p_mcp.add_argument("--host", default="127.0.0.1", help="Host interface for SSE / streamable-http transport")
     p_mcp.add_argument("--port", type=int, default=8000, help="Port for SSE / streamable-http transport")
     p_mcp.add_argument("--check-only", action="store_true", help="Run pre-flight DB & procedure directory health check and exit")
+
+    # creds command
+    p_creds = subparsers.add_parser("creds", parents=[common], help="Print copy-pasteable MCP credentials (JSON, TOML, CLI) for Cursor, Antigravity, Claude Code, and Codex")
+    p_creds.add_argument("--use-wrapper", action="store_true", help="Use lethe.sh / lethe.cmd wrapper instead of direct CLI/Python path")
+    p_creds.add_argument("--json", action="store_true", help="Output credentials payload as JSON")
 
     # health command
     p_health = subparsers.add_parser("health", parents=[common], help="Verify SQLite WAL health, schema version, and procedure directory readiness")
@@ -353,8 +435,9 @@ def main():
     # setup command
     p_setup = subparsers.add_parser("setup", parents=[common], help="Auto-configure MCP integration for Cursor, Claude Code, Antigravity, Codex, and VS Code")
     p_setup.add_argument("--check", action="store_true", help="Inspect and check detected tools without modifying files")
+    p_setup.add_argument("--print", dest="print_creds", action="store_true", help="Print copy-pasteable MCP credentials without modifying files")
     p_setup.add_argument("--tool", default="all", choices=["all", "cursor", "claude", "antigravity", "codex", "vscode"], help="Target specific tool")
-    p_setup.add_argument("--use-wrapper", action="store_true", help="Wire tools using lethe.sh / lethe.cmd wrapper instead of direct Python path")
+    p_setup.add_argument("--use-wrapper", action="store_true", help="Wire tools using lethe.sh / lethe.cmd wrapper instead of direct CLI/Python path")
 
     # ui command
     p_ui = subparsers.add_parser("ui", parents=[common], help="Launch the Lethe real-time developer dashboard")
@@ -364,41 +447,24 @@ def main():
 
     args = parser.parse_args()
 
-    if args.subcommand == "mcp":
-        from lethe.mcp.server import create_mcp_server, verify_mcp_preflight
-        health = verify_mcp_preflight(args.db, procedures_dir=args.procedures_dir)
-        if getattr(args, "check_only", False):
-            print(json.dumps(health, indent=2))
-            return
-        server = create_mcp_server(args.db, procedures_dir=args.procedures_dir)
-        if args.transport == "sse":
-            server.run(transport="sse", host=args.host, port=args.port)
-        elif args.transport == "streamable-http":
-            server.run(transport="streamable-http", host=args.host, port=args.port)
-        else:
-            server.run(transport="stdio")
-    elif args.subcommand == "health":
-        cmd_health(args)
-    elif args.subcommand == "store":
-        cmd_store(args)
-    elif args.subcommand == "recall":
-        cmd_recall(args)
-    elif args.subcommand == "procedures":
-        cmd_procedures(args)
-    elif args.subcommand == "flush-ephemeral":
-        cmd_flush_ephemeral(args)
-    elif args.subcommand == "inspect":
-        cmd_inspect(args)
-    elif args.subcommand == "forget":
-        cmd_forget(args)
-    elif args.subcommand == "demo":
-        cmd_demo(args)
-    elif args.subcommand == "benchmark":
-        cmd_benchmark(args)
-    elif args.subcommand == "setup":
-        cmd_setup(args)
-    elif args.subcommand == "ui":
-        cmd_ui(args)
+    dispatch = {
+        "mcp": cmd_mcp,
+        "creds": cmd_creds,
+        "health": cmd_health,
+        "store": cmd_store,
+        "recall": cmd_recall,
+        "procedures": cmd_procedures,
+        "flush-ephemeral": cmd_flush_ephemeral,
+        "inspect": cmd_inspect,
+        "forget": cmd_forget,
+        "demo": cmd_demo,
+        "benchmark": cmd_benchmark,
+        "setup": cmd_setup,
+        "ui": cmd_ui,
+    }
+    handler = dispatch.get(args.subcommand)
+    if handler:
+        handler(args)
     else:
         parser.print_help()
 

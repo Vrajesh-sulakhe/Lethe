@@ -505,6 +505,93 @@ def test_mcp_custom_http_health_and_stats_routes():
     asyncio.run(_check_routes())
 
 
+def test_universal_default_db_and_procedures_paths(monkeypatch):
+    import os
+    from lethe.platform.setup import get_default_db_path, get_default_procedures_dir
+
+    monkeypatch.delenv("LETHE_DB", raising=False)
+    monkeypatch.delenv("LETHE_PROCEDURES_DIR", raising=False)
+
+    expected_db = os.path.abspath(str(Path.home() / ".lethe" / "lethe.db"))
+    expected_procs = os.path.abspath(str(Path.home() / ".lethe" / "procedures"))
+    assert get_default_db_path() == expected_db
+    assert get_default_procedures_dir() == expected_procs
+
+    monkeypatch.setenv("LETHE_DB", "/tmp/env_lethe.db")
+    monkeypatch.setenv("LETHE_PROCEDURES_DIR", "/tmp/env_procs")
+    assert get_default_db_path() == "/tmp/env_lethe.db"
+    assert get_default_procedures_dir() == "/tmp/env_procs"
+
+
+def test_generate_mcp_config_prefers_global_lethe_cli():
+    cfg = generate_mcp_config(
+        db_path="/tmp/shared.db",
+        procedures_dir="/tmp/procs",
+        lethe_cmd="/usr/local/bin/lethe",
+    )
+    assert cfg["command"] == "/usr/local/bin/lethe"
+    assert cfg["args"] == [
+        "mcp",
+        "--db", "/tmp/shared.db",
+        "--procedures-dir", "/tmp/procs",
+    ]
+
+
+def test_cli_creds_setup_print_and_error_handling():
+    import subprocess
+    import sys
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_file = str(Path(tmpdir) / "cli_creds.db")
+        procs_dir = str(Path(tmpdir) / "procedures")
+
+        # 1. `lethe creds --json`
+        r_creds = subprocess.run(
+            [sys.executable, "-m", "lethe.cli", "--db", db_file, "--procedures-dir", procs_dir, "creds", "--json"],
+            capture_output=True, text=True, check=True,
+        )
+        creds = json.loads(r_creds.stdout)
+        assert creds["db_path"] == db_file
+        assert creds["procedures_dir"] == procs_dir
+        assert "mcpServers" in json.loads(creds["json_snippet"])
+        assert "[mcp_servers.lethe]" in creds["toml_snippet"]
+        assert "claude mcp add -s user lethe --" in creds["claude_cli"]
+        assert "codex mcp add lethe --" in creds["codex_cli"]
+
+        # 2. `lethe setup --print`
+        r_print = subprocess.run(
+            [sys.executable, "-m", "lethe.cli", "--db", db_file, "--procedures-dir", procs_dir, "setup", "--print"],
+            capture_output=True, text=True, check=True,
+        )
+        assert "LETHE MCP CONNECTION CREDENTIALS" in r_print.stdout
+        assert db_file in r_print.stdout
+
+        # 3. `lethe mcp --check-only`
+        r_chk = subprocess.run(
+            [sys.executable, "-m", "lethe.cli", "mcp", "--db", db_file, "--procedures-dir", procs_dir, "--check-only"],
+            capture_output=True, text=True, check=True,
+        )
+        assert json.loads(r_chk.stdout)["healthy"] is True
+
+        # 4. Partial relational args in `store` fail cleanly
+        r_partial = subprocess.run(
+            [sys.executable, "-m", "lethe.cli", "--db", db_file, "store", "Partial fact", "--entity", "user"],
+            capture_output=True, text=True,
+        )
+        assert r_partial.returncode != 0
+        assert "must all be provided together" in r_partial.stderr
+
+        # 5. Missing `--file` in `procedures write` fails cleanly without raw traceback
+        r_missing_file = subprocess.run(
+            [sys.executable, "-m", "lethe.cli", "--db", db_file, "procedures", "write", "x.md", "--file", "/nonexistent/nope.md"],
+            capture_output=True, text=True,
+        )
+        assert r_missing_file.returncode != 0
+        assert "Traceback" not in r_missing_file.stderr
+        assert "Error reading" in r_missing_file.stderr
+
+
+
 
 
 

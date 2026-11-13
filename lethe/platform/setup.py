@@ -1,10 +1,17 @@
 import json
 import os
 import re
+import shlex
+import shutil
 import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def get_default_home_dir() -> Path:
+    """Returns the shared Lethe home directory (~/.lethe)."""
+    return Path.home() / ".lethe"
 
 
 def get_default_python_executable() -> str:
@@ -12,9 +19,25 @@ def get_default_python_executable() -> str:
     return os.path.abspath(sys.executable)
 
 
+def get_default_lethe_executable() -> Optional[str]:
+    """Returns the absolute path to the globally installed `lethe` CLI if available on PATH."""
+    found = shutil.which("lethe")
+    if found:
+        return os.path.abspath(found)
+    return None
+
+
 def get_default_db_path(db_path: Optional[str] = None) -> str:
-    """Returns the absolute path to the Lethe database."""
-    target = Path(os.path.expanduser(db_path)) if db_path else Path.cwd() / "lethe.db"
+    """Returns the absolute path to the Lethe database (defaults to ~/.lethe/lethe.db or $LETHE_DB)."""
+    raw = db_path or os.environ.get("LETHE_DB")
+    target = Path(os.path.expanduser(raw)) if raw else get_default_home_dir() / "lethe.db"
+    return os.path.abspath(str(target))
+
+
+def get_default_procedures_dir(procedures_dir: Optional[str] = None) -> str:
+    """Returns the absolute path to the Lethe procedures directory (defaults to ~/.lethe/procedures)."""
+    raw = procedures_dir or os.environ.get("LETHE_PROCEDURES_DIR")
+    target = Path(os.path.expanduser(raw)) if raw else get_default_home_dir() / "procedures"
     return os.path.abspath(str(target))
 
 
@@ -33,20 +56,30 @@ def generate_mcp_config(
     db_path: Optional[str] = None,
     procedures_dir: Optional[str] = None,
     use_wrapper: bool = False,
+    lethe_cmd: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generates the standard MCP server specification for Lethe."""
-    db = get_default_db_path(db_path) if db_path else get_default_db_path()
+    db = get_default_db_path(db_path)
     wrapper = get_wrapper_script_path() if use_wrapper else None
+    global_cli: Optional[str] = None
+    if not python_path and not wrapper:
+        global_cli = (lethe_cmd or None) if lethe_cmd is not None else get_default_lethe_executable()
 
-    if wrapper and not python_path:
+    if python_path:
+        cmd = python_path
+        args = ["-m", "lethe.cli", "mcp", "--db", db]
+    elif wrapper:
         cmd = wrapper
         args = ["mcp", "--db", db]
+    elif global_cli:
+        cmd = global_cli
+        args = ["mcp", "--db", db]
     else:
-        cmd = python_path or get_default_python_executable()
+        cmd = get_default_python_executable()
         args = ["-m", "lethe.cli", "mcp", "--db", db]
 
     if procedures_dir:
-        args.extend(["--procedures-dir", os.path.abspath(os.path.expanduser(procedures_dir))])
+        args.extend(["--procedures-dir", get_default_procedures_dir(procedures_dir)])
 
     return {
         "command": cmd,
@@ -181,6 +214,8 @@ def detect_installed_tools(workspace_dir: Optional[Path] = None) -> Dict[str, Di
     - path: Best active path to write configuration
     - is_configured: True if 'lethe' server entry is already present
     """
+    ws = (workspace_dir or Path.cwd()).resolve()
+    home = Path.home().resolve()
     targets = get_known_tool_targets(workspace_dir)
     results: Dict[str, Dict[str, Any]] = {}
 
@@ -188,15 +223,30 @@ def detect_installed_tools(workspace_dir: Optional[Path] = None) -> Dict[str, Di
         found_path: Optional[Path] = None
         is_configured = False
 
-        # First check for existing files
+        # Prefer an explicit workspace tool directory (e.g. <ws>/.cursor/) if present
         for p in paths:
-            if p.exists():
+            resolved_parent = p.parent.resolve()
+            if (
+                resolved_parent != ws
+                and resolved_parent != home
+                and ws in p.resolve().parents
+                and p.parent.exists()
+            ):
                 found_path = p
-                if _is_lethe_configured(p):
-                    is_configured = True
-                    break
+                if p.exists():
+                    is_configured = _is_lethe_configured(p)
+                break
 
-        # If file doesn't exist, pick the first valid parent directory or default workspace path
+        # Next check for existing config files in priority order
+        if not found_path:
+            for p in paths:
+                if p.exists():
+                    found_path = p
+                    if _is_lethe_configured(p):
+                        is_configured = True
+                        break
+
+        # If file doesn't exist yet, pick the first valid parent directory or default path
         if not found_path:
             for p in paths:
                 if p.parent.exists():
@@ -311,4 +361,93 @@ def setup_all_tools(
         outcomes.append(outcome)
 
     return outcomes
+
+
+def _shell_join(parts: List[str]) -> str:
+    """Quotes command parts cleanly for terminal copy-paste."""
+    if hasattr(shlex, "join"):
+        return shlex.join(parts)
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def build_mcp_credentials(
+    python_path: Optional[str] = None,
+    db_path: Optional[str] = None,
+    procedures_dir: Optional[str] = None,
+    use_wrapper: bool = False,
+    lethe_cmd: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generates ready-to-paste MCP connection credentials across JSON (Cursor/Antigravity/Claude),
+    TOML (Codex), and one-line CLI commands for the shared Lethe memory bus.
+    """
+    resolved_db = get_default_db_path(db_path)
+    resolved_procs = get_default_procedures_dir(procedures_dir)
+    entry = generate_mcp_config(
+        python_path=python_path,
+        db_path=resolved_db,
+        procedures_dir=resolved_procs,
+        use_wrapper=use_wrapper,
+        lethe_cmd=lethe_cmd,
+    )
+
+    json_snippet = json.dumps({"mcpServers": {"lethe": entry}}, indent=2)
+    toml_snippet = _merge_toml_mcp_server("", "lethe", entry).strip()
+    launch_cmd = _shell_join([entry["command"], *entry["args"]])
+
+    return {
+        "db_path": resolved_db,
+        "procedures_dir": resolved_procs,
+        "mcp_entry": entry,
+        "json_snippet": json_snippet,
+        "toml_snippet": toml_snippet,
+        "claude_cli": f"claude mcp add -s user lethe -- {launch_cmd}",
+        "codex_cli": f"codex mcp add lethe -- {launch_cmd}",
+    }
+
+
+def format_mcp_credentials(
+    python_path: Optional[str] = None,
+    db_path: Optional[str] = None,
+    procedures_dir: Optional[str] = None,
+    use_wrapper: bool = False,
+    lethe_cmd: Optional[str] = None,
+) -> str:
+    """Formats MCP credentials in human-readable copy-pasteable sections."""
+    creds = build_mcp_credentials(
+        python_path=python_path,
+        db_path=db_path,
+        procedures_dir=procedures_dir,
+        use_wrapper=use_wrapper,
+        lethe_cmd=lethe_cmd,
+    )
+    lines = [
+        "=" * 80,
+        " LETHE MCP CONNECTION CREDENTIALS (UNIVERSAL MEMORY BUS)",
+        "=" * 80,
+        f" Shared Database (--db):        {creds['db_path']}",
+        f" Shared Runbooks (--procedures): {creds['procedures_dir']}",
+        f" Command:                       {creds['mcp_entry']['command']}",
+        "",
+        " [1] Cursor / Antigravity / Claude Code JSON",
+        "     Cursor:      Settings -> Tools & MCP -> Add new global MCP server",
+        "     Antigravity: Manage MCP Servers -> View raw config",
+        "-" * 80,
+        creds["json_snippet"],
+        "",
+        " [2] Codex CLI / Desktop TOML (~/.codex/config.toml)",
+        "-" * 80,
+        creds["toml_snippet"],
+        "",
+        " [3] One-Line Terminal Commands",
+        "-" * 80,
+        f" Claude Code: {creds['claude_cli']}",
+        f" Codex:       {creds['codex_cli']}",
+        "",
+        " Or auto-wire all detected tools at once:",
+        "   lethe setup",
+        "=" * 80,
+    ]
+    return "\n".join(lines)
+
 

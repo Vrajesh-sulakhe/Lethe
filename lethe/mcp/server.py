@@ -37,6 +37,10 @@ def create_mcp_server(
     """
     server = MCPServer("lethe-memory")
     memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
+    health = memory.check_health()
+    if not health.get("healthy", False):
+        memory.close()
+        raise RuntimeError(f"Lethe pre-flight health check failed: {json.dumps(health)}")
 
     @server.custom_route("/health", methods=["GET"])
     async def http_health_check(request: Request) -> JSONResponse:
@@ -304,12 +308,30 @@ def create_mcp_server(
     return server
 
 
+def run_mcp_server(
+    db_path: Path | str = "lethe.db",
+    procedures_dir: Path | str = "procedures",
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> None:
+    """Runs pre-flight check once inside create_mcp_server and starts the requested transport."""
+    server = create_mcp_server(db_path, procedures_dir=procedures_dir)
+    if transport == "sse":
+        server.run(transport="sse", host=host, port=port)
+    elif transport == "streamable-http":
+        server.run(transport="streamable-http", host=host, port=port)
+    else:
+        server.run(transport="stdio")
+
+
 def main():
     import argparse
+    from lethe.platform.setup import get_default_db_path, get_default_procedures_dir
 
     parser = argparse.ArgumentParser(description="Lethe MCP Server")
-    parser.add_argument("--db", default="lethe.db", help="Path to SQLite database file")
-    parser.add_argument("--procedures-dir", default="procedures", help="Directory for Markdown runbooks")
+    parser.add_argument("--db", default=get_default_db_path(), help="Path to SQLite database file")
+    parser.add_argument("--procedures-dir", default=get_default_procedures_dir(), help="Directory for Markdown runbooks")
     parser.add_argument(
         "--transport",
         default="stdio",
@@ -320,14 +342,13 @@ def main():
     parser.add_argument("--port", type=int, default=8000, help="Port for SSE / streamable-http transport")
     args = parser.parse_args()
 
-    verify_mcp_preflight(args.db, procedures_dir=args.procedures_dir)
-    server = create_mcp_server(args.db, procedures_dir=args.procedures_dir)
-    if args.transport == "sse":
-        server.run(transport="sse", host=args.host, port=args.port)
-    elif args.transport == "streamable-http":
-        server.run(transport="streamable-http", host=args.host, port=args.port)
-    else:
-        server.run(transport="stdio")
+    run_mcp_server(
+        db_path=args.db,
+        procedures_dir=args.procedures_dir,
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":
