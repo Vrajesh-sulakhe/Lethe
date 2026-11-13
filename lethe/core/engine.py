@@ -11,12 +11,17 @@ from lethe.models import (
     HandoverPacket,
     DeletionReceipt,
     CodeAnchor,
+    BranchInfo,
+    MemoryCommit,
+    MergeResult,
+    SyncDelta,
 )
 from lethe.core.drift import (
     check_code_drift,
     compute_file_content_hash,
     get_git_commit_sha,
 )
+from lethe.core.git import MemoryGitManager
 from lethe.core.synthesis import MemorySynthesizer
 from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
@@ -66,6 +71,7 @@ class LetheMemory:
         self.trust_gate = TrustGateManager(self.db)
         self.knapsack = KnapsackPacker()
         self.synthesizer = MemorySynthesizer(self.db)
+        self.git = MemoryGitManager(self.db, self.semantic, self.lineage)
 
     def store(
         self,
@@ -81,6 +87,7 @@ class LetheMemory:
         workspace_id: Optional[str] = None,
         scope: str = "project",
         code_anchor: Optional[CodeAnchor | Dict[str, Any]] = None,
+        branch: Optional[str] = None,
     ) -> MemoryNode:
         """
         Stores a memory through the trust gate, bitemporal clock, and lineage DAG.
@@ -135,6 +142,7 @@ class LetheMemory:
         if anchor_obj:
             node_metadata["code_anchor"] = anchor_obj.model_dump()
 
+        target_branch = branch or self.current_branch
         node = MemoryNode(
             id=str(uuid.uuid4()),
             content=content,
@@ -149,6 +157,7 @@ class LetheMemory:
             parent_ids=parent_ids or [],
             workspace_id=resolved_workspace,
             scope=scope,
+            branch=target_branch,
             code_anchor=anchor_obj,
             metadata=node_metadata,
         )
@@ -156,6 +165,11 @@ class LetheMemory:
         # 1. Trust Gate Check
         verdict = self.trust_gate.process_input(node)
         if not verdict["allowed"]:
+            self.db.log_audit_event(
+                "MEMORY_QUARANTINED",
+                target_id=node.id,
+                details={"branch": target_branch, "category": category, "reason": verdict.get("reason", "")},
+            )
             return node
 
         # 2. Bitemporal & Conflict Check
@@ -180,6 +194,19 @@ class LetheMemory:
             self.ledger.record_store(node)
         except Exception:
             pass
+
+        # 6. Emit audit event for cross-tool reactive sync
+        self.db.log_audit_event(
+            "MEMORY_CONFLICT" if conflicts else "MEMORY_STORED",
+            target_id=node.id,
+            details={
+                "branch": target_branch,
+                "category": category,
+                "tier": tier.value if isinstance(tier, StorageTier) else str(tier),
+                "summary": content[:140],
+                "conflicts": len(conflicts),
+            },
+        )
 
         return node
 
@@ -211,6 +238,7 @@ class LetheMemory:
             tier=StorageTier.EPHEMERAL,
             session_id=session_id,
             workspace_id=workspace_id,
+            branch=self.current_branch,
         )
         flushed_ids: List[str] = []
         seen_ids = set()
@@ -264,6 +292,7 @@ class LetheMemory:
         model_name: Optional[str] = None,
         max_context_tokens: Optional[int] = None,
         remaining_context_tokens: Optional[int] = None,
+        branch: Optional[str] = None,
     ) -> QueryResult:
         """
         Retrieves relevant memories within strict post-format token budget.
@@ -290,9 +319,10 @@ class LetheMemory:
 
         candidates: List[Tuple[MemoryNode, float]] = []
         target_ws = workspace_id or self.workspace_id
+        target_branch = branch or self.current_branch
         is_trusted = self.security.is_workspace_trusted(target_ws)
 
-        # 1. If entity filter provided, check Relational Tier within workspace scope
+        # 1. If entity filter provided, check Relational Tier within workspace scope & branch
         if entity_filter:
             parts = entity_filter.split(".")
             if len(parts) == 2:
@@ -302,6 +332,7 @@ class LetheMemory:
                     as_of_time=as_of_time,
                     workspace_id=workspace_id,
                     is_trusted=is_trusted,
+                    branch=target_branch,
                 )
                 if exact_match and exact_match.status in (
                     MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT
@@ -319,6 +350,7 @@ class LetheMemory:
             include_ephemeral=include_ephemeral,
             as_of_time=as_of_time,
             is_trusted=is_trusted,
+            branch=target_branch,
         )
         for node, score in semantic_matches:
             if as_of_time is not None:
@@ -517,7 +549,14 @@ class LetheMemory:
         # 1. If passed an explicit ID or unique prefix in memories table
         target_node = self.db.get_memory(target_id_or_query)
         if target_node:
-            return self.lineage.cascading_purge(target_node.id, reason=reason)
+            receipt = self.lineage.cascading_purge(target_node.id, reason=reason)
+            if receipt.purged_count > 0:
+                self.db.log_audit_event(
+                    "MEMORY_PURGED",
+                    target_id=target_node.id,
+                    details={"purged_count": receipt.purged_count, "branch": target_node.branch, "reason": reason},
+                )
+            return receipt
 
         # 2. If it looks like an identifier/token (no spaces, len >= 6) and was not found,
         # never attempt fuzzy semantic unlearning to prevent deleting arbitrary memories.
@@ -533,14 +572,21 @@ class LetheMemory:
 
         # 3. If passed natural language query text, search with strict term overlap and threshold
         matches = self.semantic.search(
-            target_id_or_query, top_k=3, min_score=0.45, workspace_id=workspace_id
+            target_id_or_query, top_k=3, min_score=0.45, workspace_id=workspace_id, branch=self.current_branch
         )
         if matches:
             query_words = set(re.findall(r'\b[a-zA-Z0-9_]+\b', target_id_or_query.lower())) - EmbeddingHelper.STOP_WORDS
             for top_node, score in matches:
                 doc_words = set(re.findall(r'\b[a-zA-Z0-9_]+\b', top_node.content.lower()))
                 if query_words and len(query_words & doc_words) >= 1:
-                    return self.lineage.cascading_purge(top_node.id, reason=reason)
+                    receipt = self.lineage.cascading_purge(top_node.id, reason=reason)
+                    if receipt.purged_count > 0:
+                        self.db.log_audit_event(
+                            "MEMORY_PURGED",
+                            target_id=top_node.id,
+                            details={"purged_count": receipt.purged_count, "branch": top_node.branch, "reason": reason},
+                        )
+                    return receipt
 
         # 4. If nothing verified found, return empty receipt
         return DeletionReceipt(
@@ -557,19 +603,27 @@ class LetheMemory:
         task_goal: str,
         active_memory_ids: Optional[List[str]] = None,
         epistemic_state: Optional[Dict[str, Any]] = None,
-        tool_trace: Optional[List[Dict[str, Any]]] = None
+        tool_trace: Optional[List[Dict[str, Any]]] = None,
+        branch: Optional[str] = None,
     ) -> HandoverPacket:
         """
         Serializes mid-task state into an atomic Handover Packet.
         """
+        target_branch = branch or self.current_branch
         packet = HandoverPacket(
             task_id=task_id,
             task_goal=task_goal,
             active_memory_ids=active_memory_ids or [],
             epistemic_state=epistemic_state or {},
-            last_tool_trace=tool_trace or []
+            last_tool_trace=tool_trace or [],
+            branch=target_branch,
         )
         self.db.save_handover_packet(packet)
+        self.db.log_audit_event(
+            "HANDOVER_EXPORTED",
+            target_id=task_id,
+            details={"task_goal": task_goal[:140], "branch": target_branch},
+        )
         return packet
 
     def import_handover(self, task_id: str) -> Optional[HandoverPacket]:
@@ -642,6 +696,50 @@ class LetheMemory:
                 self.db.update_memory_status(p.id, MemoryStatus.HISTORICAL, valid_to=summary_node.created_at)
 
         return summary_node
+
+    # --- Memory Git Workflows ---
+
+    @property
+    def current_branch(self) -> str:
+        return self.git.current_branch()
+
+    def create_branch(
+        self,
+        name: str,
+        from_branch: Optional[str] = None,
+        switch: bool = False,
+        description: str = "",
+    ) -> BranchInfo:
+        return self.git.create_branch(name=name, from_branch=from_branch, switch=switch, description=description)
+
+    def switch_branch(self, name: str) -> BranchInfo:
+        return self.git.switch_branch(name)
+
+    def list_branches(self) -> List[BranchInfo]:
+        return self.git.list_branches()
+
+    def delete_branch(self, name: str) -> None:
+        self.git.delete_branch(name)
+
+    def commit(self, message: str, branch: Optional[str] = None) -> MemoryCommit:
+        return self.git.commit(message=message, branch=branch)
+
+    def list_commits(self, branch: Optional[str] = None, limit: int = 50) -> List[MemoryCommit]:
+        return self.git.list_commits(branch=branch, limit=limit)
+
+    def diff_branches(self, source: str, target: str = "main") -> Dict[str, Any]:
+        return self.git.diff_branches(source=source, target=target)
+
+    def merge_branch(
+        self,
+        source: str,
+        target: Optional[str] = None,
+        strategy: str = "abort_on_conflict",
+    ) -> MergeResult:
+        return self.git.merge_branch(source=source, target=target, strategy=strategy)
+
+    def rollback(self, target: str, branch: Optional[str] = None) -> MemoryCommit:
+        return self.git.rollback(target=target, branch=branch)
 
     def check_health(self) -> Dict[str, Any]:
         """
