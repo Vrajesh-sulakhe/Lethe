@@ -80,7 +80,7 @@ def run_cross_tool_handover_simulation(db_path: str = "lethe.db") -> None:
     mem_cursor.close()
 
     print("\n" + "=" * 80)
-    print(" [✓] CROSS-TOOL DEMO SUCCESSFUL: ZERO CONTEXT LOST BETWEEN TOOLS!")
+    print(" [OK] CROSS-TOOL DEMO SUCCESSFUL: ZERO CONTEXT LOST BETWEEN TOOLS!")
     print("=" * 80 + "\n")
 
 if __name__ == "__main__":

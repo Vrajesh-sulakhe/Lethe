@@ -103,14 +103,44 @@ Lethe acts as an **Intelligent Memory Operating System** between your AI agent a
 
 ## Quickstart & Installation
 
+### Option A: Global CLI Install (Recommended — Mac, Linux & Windows)
+Install `lethe` globally so `lethe`, `lethe setup`, `lethe creds`, and `lethe mcp` work from any folder with one universal vault (`~/.lethe/lethe.db` and `~/.lethe/procedures`):
+
 ```bash
-# Clone the repository
+# macOS / Linux / Windows (with uv)
+uv tool install git+https://github.com/vrajeshsulakhe/Lethe.git
+
+# Or with pip (if not using uv):
+pip install --user git+https://github.com/vrajeshsulakhe/Lethe.git
+```
+
+> **Windows PATH note:** If `lethe` is not recognized right after `uv tool install`, run `uv tool update-shell` and open a new PowerShell/CMD window. If installed with `pip install --user`, ensure Python's user `Scripts` folder is on `PATH` (or invoke `py -m lethe.cli ...`).
+
+Then wire your tools or print copy-pasteable MCP credentials:
+```bash
+lethe setup          # Auto-wire Cursor, Claude Code, Antigravity, Codex
+lethe creds          # Print JSON / TOML / 1-line CLI credentials
+lethe health         # Verify ~/.lethe/lethe.db WAL health
+```
+
+### Option B: Local Repo Development
+
+**macOS / Linux:**
+```bash
 git clone https://github.com/vrajeshsulakhe/Lethe.git
 cd Lethe
-
-# Create virtual environment & install
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -e .
+pip install pytest
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/vrajeshsulakhe/Lethe.git
+cd Lethe
+py -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -e .
 pip install pytest
 ```
@@ -140,10 +170,13 @@ pytest tests/ -v
 
 ## Connecting via Model Context Protocol (MCP)
 
-To connect Lethe to **Claude Code**, **Cursor**, or **Gemini CLI**:
+To auto-wire **Cursor**, **Claude Code**, **Antigravity**, and **Codex** to your shared `~/.lethe/` vault:
 
 ```bash
-# Run the MCP server
+lethe setup
+# Or print copy-pasteable JSON / TOML / 1-line commands:
+lethe creds
+# Or run the MCP server directly:
 lethe mcp
 ```
 

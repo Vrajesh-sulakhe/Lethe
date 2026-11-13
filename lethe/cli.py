@@ -43,7 +43,7 @@ def cmd_inspect(args):
             tier=target_tier,
         )
     print("=" * 80)
-    print(f" LETHE MEMORY INSPECTOR — Total Records: {len(memories)}")
+    print(f" LETHE MEMORY INSPECTOR - Total Records: {len(memories)}")
     print("=" * 80)
     if not memories:
         print(" [No memories stored yet.]")
@@ -185,9 +185,9 @@ def cmd_forget(args):
     print(f" Timestamp:         {receipt.timestamp}")
     print("=" * 80)
     if receipt.purged_count > 0:
-        print(" Status: SUCCESS — 100% permanently eradicated.")
+        print(" Status: SUCCESS - 100% permanently eradicated.")
     else:
-        print(" Status: NOT FOUND — zero records modified.")
+        print(" Status: NOT FOUND - zero records modified.")
 
 
 def cmd_demo(args):
@@ -250,7 +250,7 @@ def cmd_setup(args):
 
     print(f"\nSuccessfully configured {len(results)} tool integrations (shared vault: {resolved_db}):\n")
     for r in results:
-        print(f" [✓] {r['tool'].upper():<12} -> {r['path']}")
+        print(f" [OK] {r['tool'].upper():<12} -> {r['path']}")
 
     print("=" * 80)
     print(" All selected tools are now wired to Lethe's universal MCP memory bus!")
@@ -320,7 +320,7 @@ def cmd_health(args):
         print(json.dumps(health, indent=2))
     else:
         print("=" * 80)
-        print(f" LETHE HEALTH CHECK — Status: {health['status'].upper()}")
+        print(f" LETHE HEALTH CHECK - Status: {health['status'].upper()}")
         print("=" * 80)
         print(f" Database Path:    {health['db_path']}")
         print(f" Journal Mode:     {health['journal_mode'].upper()}")
@@ -337,7 +337,19 @@ def cmd_health(args):
         sys.exit(1)
 
 
+def _configure_console_encoding() -> None:
+    """Ensures stdout/stderr never raise UnicodeEncodeError on Windows cp1252/cp437 consoles."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def main():
+    _configure_console_encoding()
     parser = argparse.ArgumentParser(
         prog="lethe",
         description="Lethe: Autonomous Agent Memory Operating System",

@@ -299,7 +299,7 @@ def start_dashboard(
 
     url = f"http://{host}:{active_port}"
     print("=" * 80)
-    print(" LETHE DEVELOPER DASHBOARD — LIVE REAL-TIME OBSERVABILITY")
+    print(" LETHE DEVELOPER DASHBOARD - LIVE REAL-TIME OBSERVABILITY")
     print("=" * 80)
     print(f" Local Web UI:    {url}")
     print(f" SQLite Database: {Path(db_path).resolve()}")

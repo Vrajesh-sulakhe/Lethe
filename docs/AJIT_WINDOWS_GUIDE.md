@@ -89,16 +89,26 @@ lethe benchmark
 ```
 Outputs the ASCII benchmark scoreboard comparing full history against Lethe.
 
-### C. Run the MCP Server for Claude Code / Cursor
+### C. Wire Cursor / Claude Code / Antigravity / Codex & Print Credentials
+```powershell
+# Auto-wire all detected tools to ~/.lethe/lethe.db
+lethe setup
+
+# Print JSON / TOML / 1-line commands for manual UI setup
+lethe creds
+```
+
+### D. Run the MCP Server Manually
 ```powershell
 lethe mcp
 ```
-Starts the Model Context Protocol server over `stdio` so Cursor or Claude Code can connect to Lethe.
+Starts the Model Context Protocol server over `stdio` so Cursor, Claude Code, Antigravity, or Codex can connect to Lethe.
 
 ---
 
 ## 6. Windows-Specific Tips & FAQ
 
+* **Global CLI on Windows (No venv activation needed):** Run `uv tool install .` (then `uv tool update-shell` and reopen PowerShell) or `pip install --user -e .` with Python's `Scripts` folder on `PATH`. If `lethe` is still not found on `PATH`, run `py -m lethe.cli ...` or `.\lethe.cmd ...` from the repo folder.
 * **File Paths:** All Lethe modules use `pathlib.Path`, so you never need to worry about forward vs. backslashes (`\` vs `/`).
 * **Database Locks:** SQLite in Lethe is configured with `PRAGMA busy_timeout = 30000;` and WAL mode, preventing Windows file-locking collisions.
 * **No C++ Build Tools Needed:** Lethe uses a pure-Python cosine vector similarity fallback, meaning you do **not** need Microsoft Visual Studio C++ Build Tools installed.

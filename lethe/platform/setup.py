@@ -3,6 +3,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -20,10 +21,21 @@ def get_default_python_executable() -> str:
 
 
 def get_default_lethe_executable() -> Optional[str]:
-    """Returns the absolute path to the globally installed `lethe` CLI if available on PATH."""
-    found = shutil.which("lethe")
-    if found:
-        return os.path.abspath(found)
+    """
+    Returns the absolute path to an installed `lethe` executable.
+    Skips batch/shell wrapper scripts (.cmd/.bat/.sh) so cwd wrappers do not
+    shadow real binaries or trigger Electron/Node Windows spawn EINVAL errors.
+    """
+    names = ("lethe.exe", "lethe") if sys.platform == "win32" else ("lethe",)
+    for name in names:
+        found = shutil.which(name)
+        if found and Path(found).suffix.lower() not in {".cmd", ".bat", ".sh"}:
+            return os.path.abspath(found)
+
+    sibling_name = "lethe.exe" if sys.platform == "win32" else "lethe"
+    sibling = Path(sys.executable).parent / sibling_name
+    if sibling.exists() and sibling.is_file():
+        return os.path.abspath(str(sibling))
     return None
 
 
@@ -86,6 +98,7 @@ def generate_mcp_config(
         "args": args,
         "env": {
             "PYTHONUNBUFFERED": "1",
+            "PYTHONIOENCODING": "utf-8",
         },
     }
 
@@ -364,7 +377,9 @@ def setup_all_tools(
 
 
 def _shell_join(parts: List[str]) -> str:
-    """Quotes command parts cleanly for terminal copy-paste."""
+    """Quotes command parts cleanly for the active OS shell."""
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(parts)
     if hasattr(shlex, "join"):
         return shlex.join(parts)
     return " ".join(shlex.quote(p) for p in parts)

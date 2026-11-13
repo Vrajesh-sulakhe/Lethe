@@ -26,10 +26,22 @@ if exist "%SCRIPT_DIR%\venv\Scripts\python.exe" (
     goto :run
 )
 
-where python >nul 2>nul
+where py >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
-    set "PYTHON_BIN=python"
-    goto :run
+    for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do (
+        if exist "%%P" (
+            set "PYTHON_BIN=%%P"
+            goto :run
+        )
+    )
+)
+
+for /f "delims=" %%P in ('where python 2^>nul') do (
+    "%%P" -c "import sys" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_BIN=%%P"
+        goto :run
+    )
 )
 
 echo Error: Could not locate a Python 3.10+ interpreter for Lethe. 1>&2

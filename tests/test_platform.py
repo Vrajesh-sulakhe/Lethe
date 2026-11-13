@@ -591,6 +591,54 @@ def test_cli_creds_setup_print_and_error_handling():
         assert "Error reading" in r_missing_file.stderr
 
 
+def test_windows_executable_resolution_and_quoting(monkeypatch):
+    import lethe.platform.setup as setup_mod
+
+    monkeypatch.setattr(setup_mod.sys, "platform", "win32")
+
+    # 1. Must never choose cwd lethe.cmd wrapper when use_wrapper=False
+    monkeypatch.setattr(setup_mod.shutil, "which", lambda name: r"C:\repo\lethe.cmd")
+    monkeypatch.setattr(setup_mod.sys, "executable", r"C:\nonexistent\python.exe")
+    assert setup_mod.get_default_lethe_executable() is None
+
+    # 2. Accepts real .exe on PATH and formats double-quoted Windows command line
+    monkeypatch.setattr(
+        setup_mod.shutil,
+        "which",
+        lambda name: r"C:\Users\Ajit\.local\bin\lethe.exe" if name == "lethe.exe" else None,
+    )
+    assert setup_mod.get_default_lethe_executable().endswith("lethe.exe")
+
+    joined = setup_mod._shell_join([r"C:\Program Files\lethe.exe", "mcp", "--db", r"C:\Users\My Name\.lethe\lethe.db"])
+    assert '"' in joined
+    assert not joined.startswith("'")
+
+
+def test_cli_handles_cp437_windows_console_encoding():
+    import os
+    import subprocess
+    import sys
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_file = str(Path(tmpdir) / "win_cp437.db")
+        procs_dir = str(Path(tmpdir) / "procedures")
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "cp437"
+
+        base = [sys.executable, "-m", "lethe.cli", "--db", db_file, "--procedures-dir", procs_dir]
+        for cmd_args in [
+            ["store", "Unicode memory: Café — ✓ OK"],
+            ["inspect"],
+            ["health"],
+            ["forget", "Unicode memory"],
+            ["creds"],
+        ]:
+            res = subprocess.run(base + cmd_args, capture_output=True, text=True, env=env)
+            assert res.returncode == 0, f"Command {cmd_args} failed under cp437: {res.stderr}"
+            assert "UnicodeEncodeError" not in res.stderr
+
+
+
 
 
 
