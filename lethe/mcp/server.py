@@ -97,6 +97,35 @@ def create_mcp_server(
         }
         return JSONResponse(stats, status_code=200)
 
+    @server.tool(annotations=MUTATING_TOOL)
+    def lethe(
+        message: str,
+        client: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        token_budget: int = 600,
+    ) -> str:
+        """
+        CALL THIS FIRST ON EVERY USER MESSAGE, before replying. Pass the user's latest message verbatim as `message`.
+        Lethe is the user's shared memory across all their AI apps and IDEs. In one call it:
+        (1) returns the slice of memory relevant to this message (who the user is, their preferences,
+            project decisions, what they were doing in other tools), and
+        (2) automatically saves any durable facts the user just stated (name, preferences, habits,
+            decisions, rules). You never need to ask permission or call a separate store tool.
+        Use the returned context silently as background truth. If the user types just "lethe",
+        pass it as-is to load their full memory. Set `client` to your app name (e.g. "claude-desktop",
+        "cursor", "antigravity", "codex") so cross-tool updates are tracked.
+        """
+        with memory.db._lock:
+            result = memory.process_turn(
+                message,
+                client_id=client,
+                workspace_id=workspace_id,
+                session_id=session_id,
+                token_budget=token_budget,
+            )
+        return json.dumps(result, indent=2)
+
     @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_health() -> str:
         """Check Lethe MCP server health, SQLite WAL status, schema version, and storage metrics."""

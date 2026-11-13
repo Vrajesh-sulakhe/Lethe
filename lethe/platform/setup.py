@@ -857,11 +857,12 @@ def install_global_cli(
     }
 
 
-def _build_hook_inject_command(
+def _build_hook_command(
+    action: str,
     client_id: str,
     db_path: Optional[str] = None,
     procedures_dir: Optional[str] = None,
-    max_tokens: int = 300,
+    max_tokens: int = 600,
 ) -> str:
     global_cli = get_default_lethe_executable()
     parts: List[str] = (
@@ -871,28 +872,34 @@ def _build_hook_inject_command(
         parts.extend(["--db", get_default_db_path(db_path)])
     if procedures_dir:
         parts.extend(["--procedures-dir", get_default_procedures_dir(procedures_dir)])
-    parts.extend(["hook", "inject", "--client", client_id, "--max-tokens", str(max_tokens)])
+    parts.extend(["hook", action, "--client", client_id, "--max-tokens", str(max_tokens)])
     return _shell_join(parts)
+
+
+def _is_lethe_hook_cmd(cmd: str) -> bool:
+    return "lethe" in cmd and ("hook turn" in cmd or "hook boot" in cmd or "hook inject" in cmd)
 
 
 def install_claude_hooks(
     settings_path: Optional[Path | str] = None,
     db_path: Optional[str] = None,
     procedures_dir: Optional[str] = None,
-    max_tokens: int = 300,
+    max_tokens: int = 600,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
-    Idempotently installs Claude Code SessionStart & UserPromptSubmit hooks
-    for zero-prompt cross-tool memory injection, with .bak backup safety.
+    Idempotently installs Claude Code SessionStart (`hook boot`) & UserPromptSubmit
+    (`hook turn`) hooks for zero-prompt auto-capture + slice recall, with .bak backup safety.
     """
     target = Path(settings_path) if settings_path else (Path.home() / ".claude" / "settings.json")
-    hook_cmd = _build_hook_inject_command(
-        client_id="claude",
-        db_path=db_path,
-        procedures_dir=procedures_dir,
-        max_tokens=max_tokens,
-    )
+    event_commands = {
+        "SessionStart": _build_hook_command(
+            "boot", client_id="claude", db_path=db_path, procedures_dir=procedures_dir, max_tokens=max(max_tokens, 600),
+        ),
+        "UserPromptSubmit": _build_hook_command(
+            "turn", client_id="claude", db_path=db_path, procedures_dir=procedures_dir, max_tokens=max_tokens,
+        ),
+    }
 
     existing: Dict[str, Any] = {}
     if target.exists():
@@ -912,24 +919,33 @@ def install_claude_hooks(
         existing["hooks"] = hooks
 
     changed = False
-    for event_name in ("SessionStart", "UserPromptSubmit"):
+    for event_name, desired_cmd in event_commands.items():
         entries = hooks.get(event_name)
         if not isinstance(entries, list):
             entries = []
             hooks[event_name] = entries
 
-        already_present = any(
-            isinstance(item, dict)
-            and any(
-                isinstance(h, dict) and "lethe" in str(h.get("command", "")) and "hook inject" in str(h.get("command", ""))
-                for h in (item.get("hooks") or [])
-            )
-            for item in entries
-        )
-        if not already_present:
+        found_current = False
+        upgraded = False
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            for h in (item.get("hooks") or []):
+                if not isinstance(h, dict):
+                    continue
+                cmd = str(h.get("command", ""))
+                if cmd == desired_cmd:
+                    found_current = True
+                elif _is_lethe_hook_cmd(cmd):
+                    h["command"] = desired_cmd
+                    found_current = True
+                    upgraded = True
+        if upgraded:
+            changed = True
+        elif not found_current:
             entries.append({
                 "matcher": "*",
-                "hooks": [{"type": "command", "command": hook_cmd}],
+                "hooks": [{"type": "command", "command": desired_cmd}],
             })
             changed = True
 
@@ -944,7 +960,7 @@ def install_claude_hooks(
         "tool": "claude_hooks",
         "path": str(target),
         "status": ("dry_run" if dry_run else ("configured" if changed else "already_configured")),
-        "command": hook_cmd,
+        "command": event_commands["UserPromptSubmit"],
     }
 
 

@@ -32,6 +32,8 @@ from lethe.core.retrieval import (
     retrieve_specific_candidates,
 )
 from lethe.core.synthesis import MemorySynthesizer
+from lethe.core.capture import extract_durable_facts, parse_lethe_invocation
+from lethe.core.retrieval import GLOBAL_PERSONAL_CATEGORIES
 from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
 from lethe.storage.ledger import CryptographicLedger
@@ -916,6 +918,148 @@ class LetheMemory:
             "active_handover": active_hp,
             "sync_delta": sync_info,
             "drift_warnings": ctx["drift_warnings"],
+        }
+
+    # ------------------------------------------------------------------ turn API
+    def _find_active_capture(self, content_hash: str, target_ws: Optional[str]) -> Optional[str]:
+        with self.db._lock:
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                """
+                SELECT id FROM memories
+                WHERE status IN ('active', 'conflict')
+                  AND json_extract(metadata_json, '$.capture_hash') = ?
+                  AND (scope = 'global' OR workspace_id IS NULL OR workspace_id = ?)
+                LIMIT 1
+                """,
+                (content_hash, target_ws),
+            )
+            row = cursor.fetchone()
+        return row[0] if row else None
+
+    def capture_turn_facts(
+        self,
+        message: str,
+        workspace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Extracts durable facts from a raw user message and stores new ones (idempotent)."""
+        target_ws = workspace_id or self.workspace_id
+        facts, skipped_sensitive = extract_durable_facts(message)
+        stored: List[Dict[str, Any]] = []
+        duplicates = 0
+        for fact in facts:
+            if self._find_active_capture(fact.capture_hash, target_ws):
+                duplicates += 1
+                continue
+            scope = None
+            if target_ws == "global_desktop" or fact.category in GLOBAL_PERSONAL_CATEGORIES:
+                scope = "global"
+            node = self.store(
+                content=fact.content,
+                category=fact.category,
+                tier=StorageTier.SEMANTIC,
+                source="user_auto_capture",
+                trust_level=0.95 if fact.explicit else 0.9,
+                session_id=session_id or (f"{client_id}_session" if client_id else "auto_session"),
+                metadata={
+                    "capture_hash": fact.capture_hash,
+                    "capture_rule": fact.rule,
+                    "capture_client": client_id or "unknown",
+                },
+                workspace_id=target_ws,
+                scope=scope,
+            )
+            if node.status == MemoryStatus.QUARANTINED:
+                continue
+            stored.append({"id": node.id[:6], "category": node.category, "content": node.content})
+        return {"stored": stored, "duplicates": duplicates, "skipped_sensitive": skipped_sensitive}
+
+    def process_turn(
+        self,
+        message: str,
+        client_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        token_budget: int = 600,
+        capture: bool = True,
+        include_sync: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        One call per user message: serves the relevant slice of memory AND silently
+        captures any durable facts the user just stated. Recall runs before capture
+        so the slice never echoes what the user just said.
+        """
+        start = time.perf_counter()
+        target_ws = workspace_id or self.workspace_id
+        budget = max(80, int(token_budget))
+        is_boot, query = parse_lethe_invocation(message)
+
+        sections: List[str] = []
+        used_ids: set[str] = set()
+        abstained = False
+
+        if is_boot:
+            boot = self.build_session_context(
+                token_budget=budget, workspace_id=target_ws, client_id=client_id, mark_read=bool(client_id)
+            )
+            if boot.get("context_text"):
+                sections.append("## Memory\n" + boot["context_text"])
+            if boot.get("active_handover"):
+                hp = boot["active_handover"]
+                sections.append(f"## Active handover\n- {hp['task_id']}: {hp['task_goal']}")
+            abstained = not sections
+        else:
+            id_budget = min(160, budget // 3)
+            identity = self.recall("who am i", token_budget=id_budget, workspace_id=target_ws)
+            if not identity.is_abstention:
+                sections.append("## Who the user is\n" + identity.context_text)
+                used_ids.update(m.id for m in identity.memories)
+
+            remaining = budget - (count_tokens("\n\n".join(sections)) if sections else 0)
+            if query and remaining > 40:
+                rel = self.recall(query[:600], token_budget=remaining, workspace_id=target_ws)
+                if rel.is_abstention:
+                    abstained = True
+                else:
+                    seen_tags = {f"#{uid[:6]}" for uid in used_ids}
+                    lines = [
+                        ln for ln in rel.context_text.splitlines()
+                        if ln.strip() and not any(tag in ln for tag in seen_tags)
+                    ]
+                    if lines:
+                        sections.append("## Relevant to this message\n" + "\n".join(lines))
+
+        if include_sync and client_id:
+            delta = self.get_sync_delta(client_id=client_id, max_tokens=min(150, max(40, budget // 4)))
+            if delta.formatted_text:
+                sections.append("## New from other tools\n" + delta.formatted_text)
+
+        captured = {"stored": [], "duplicates": 0, "skipped_sensitive": 0}
+        if capture and not is_boot:
+            captured = self.capture_turn_facts(
+                message, workspace_id=target_ws, session_id=session_id, client_id=client_id
+            )
+
+        if sections:
+            context_text = "\n\n".join(sections)
+        else:
+            context_text = "No stored memory is relevant to this message."
+        if captured["stored"]:
+            context_text += "\n\n## Saved from this message\n" + "\n".join(
+                f"- #{c['id']} [{c['category']}] {c['content']}" for c in captured["stored"]
+            )
+
+        return {
+            "context_text": context_text,
+            "tokens_used": count_tokens(context_text),
+            "is_abstention": abstained and not any(s.startswith("## Who") for s in sections),
+            "captured": captured["stored"],
+            "duplicates_skipped": captured["duplicates"],
+            "sensitive_skipped": captured["skipped_sensitive"],
+            "workspace_id": target_ws,
+            "latency_ms": round((time.perf_counter() - start) * 1000.0, 2),
         }
 
     def check_health(self) -> Dict[str, Any]:

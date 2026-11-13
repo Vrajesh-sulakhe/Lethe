@@ -4,28 +4,42 @@ from typing import Any, Dict, List, Optional
 from mcp.server.mcpserver import MCPServer
 
 LETHE_MCP_INSTRUCTIONS = (
-    "Lethe is your automatic, persistent cross-tool cognitive memory shared across Claude Desktop, "
-    "Cursor, Claude Code, Antigravity / Gemini, Codex, and OpenAI / ChatGPT Desktop.\n"
-    "NEVER wait for the user to manually type tool names such as lethe_store, lethe_recall, "
-    "lethe_branch, lethe_commit, lethe_rollback, lethe_inspect, lethe_forget, or lethe_procedures_list.\n"
-    "1. AUTONOMOUS SESSION RECALL: At the start of a new conversation, after switching tools, or whenever "
-    "the user asks about themselves ('who am i', 'what is my name', 'what do you know about me'), "
-    "'recent memories', preferences, or project decisions, proactively and silently call `lethe_context` "
-    "(preferred single boot bundle) or `lethe_recall` BEFORE answering. NEVER say 'I do not know' without checking first.\n"
-    "2. AUTONOMOUS SILENT CAPTURE: Whenever the user introduces themselves (name, handle, role -> "
-    "category='user_identity', scope='global'), shares personal preferences, snacks, foods, habits, tools "
-    "(category='preferences', scope='global'), or establishes technical architecture, decisions, or bug root causes "
-    "(category='architecture' or 'decision'), PROACTIVELY AND SILENTLY call `lethe_store` immediately in the same turn.\n"
-    "   CRITICAL: DO NOT ASK PERMISSION or say 'let me know if you want me to log this'. Silently execute `lethe_store` "
-    "alongside your conversational reply.\n"
-    "3. MEMORY GIT & UNLEARNING: Use `lethe_branch` before speculative changes and `lethe_commit` / "
-    "`lethe_rollback` to checkpoint or revert safely. Use `lethe_forget` only when the user asks to delete "
-    "a memory. Read `lethe://sync/latest` and `lethe://handovers/active` when cross-tool updates occur."
+    "Lethe is the user's shared memory across all their AI apps and IDEs (Claude Desktop, Claude Code, "
+    "Cursor, Antigravity / Gemini, Codex, ChatGPT Desktop).\n"
+    "THE ONE RULE: call the `lethe` tool FIRST on EVERY user message, before you reply, passing the user's "
+    "latest message verbatim as `message` (and your app name as `client`).\n"
+    "- It returns the relevant slice of memory (identity, preferences, decisions, what the user was doing in "
+    "other tools). Use it silently as background truth; never say 'I don't know' about the user without it.\n"
+    "- It automatically saves durable facts the user states. Never ask 'should I save this?' and never wait "
+    "for the user to type a command.\n"
+    "- If the user types just 'lethe', pass it through: Lethe returns their full memory.\n"
+    "Additional tools (`lethe_context`, `lethe_store`, `lethe_recall`, `lethe_forget`, `lethe_branch`, "
+    "`lethe_commit`, `lethe_rollback`) remain available for explicit/advanced control."
 )
 
 
 def register_lethe_prompts(server: MCPServer, memory: Any) -> None:
     """Registers actionable MCP prompts discovered automatically by desktop and IDE clients."""
+
+    @server.prompt(
+        name="lethe",
+        title="Lethe: load my memory",
+        description="Load everything Lethe knows about you and your work (identity, preferences, decisions, handovers).",
+    )
+    def lethe_prompt(question: Optional[str] = None) -> List[Dict[str, str]]:
+        message = f"lethe {question}" if question else "lethe"
+        with memory.db._lock:
+            result = memory.process_turn(message, client_id=None, capture=False)
+        return [
+            {
+                "role": "user",
+                "content": (
+                    "Here is my Lethe memory. Use it silently as background truth for this conversation, "
+                    "and keep calling the `lethe` tool on each of my messages:\n\n"
+                    f"{result['context_text']}"
+                ),
+            }
+        ]
 
     @server.prompt(
         name="session_boot",

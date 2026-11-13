@@ -27,20 +27,29 @@ class WorkspaceSecurityManager:
 
         self.trusted_workspaces: Set[str] = set()
         self.untrusted_workspaces: Set[str] = set()
+        self._loaded_mtime_ns: Optional[int] = None
         self._load_config()
 
     def _load_config(self) -> None:
         with self._lock:
-            if not self.config_path.is_file():
+            self._reload_if_changed_locked()
+
+    def _reload_if_changed_locked(self) -> None:
+        if not self.config_path.is_file():
+            self._loaded_mtime_ns = None
+            return
+        try:
+            mtime_ns = self.config_path.stat().st_mtime_ns
+            if mtime_ns == self._loaded_mtime_ns:
                 return
-            try:
-                data = json.loads(self.config_path.read_text(encoding="utf-8"))
-                self.trusted_workspaces = set(data.get("trusted_workspaces", []))
-                self.untrusted_workspaces = set(data.get("untrusted_workspaces", []))
-                if "default_trust" in data:
-                    self.default_trust = bool(data["default_trust"])
-            except Exception:
-                pass
+            data = json.loads(self.config_path.read_text(encoding="utf-8"))
+            self.trusted_workspaces = set(data.get("trusted_workspaces", []))
+            self.untrusted_workspaces = set(data.get("untrusted_workspaces", []))
+            if "default_trust" in data:
+                self.default_trust = bool(data["default_trust"])
+            self._loaded_mtime_ns = mtime_ns
+        except Exception:
+            pass
 
     def _save_config(self) -> None:
         try:
@@ -51,6 +60,7 @@ class WorkspaceSecurityManager:
                 "default_trust": self.default_trust,
             }
             self.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self._loaded_mtime_ns = self.config_path.stat().st_mtime_ns
         except OSError:
             pass
 
@@ -79,6 +89,7 @@ class WorkspaceSecurityManager:
         if workspace_id is None:
             return True
         with self._lock:
+            self._reload_if_changed_locked()
             if workspace_id in self.untrusted_workspaces:
                 return False
             if workspace_id in self.trusted_workspaces:
@@ -97,10 +108,16 @@ class WorkspaceSecurityManager:
         """
         Enforces read access control:
         - If node.scope == 'global': allowed ONLY if workspace is trusted.
+        - If workspace_id == 'global_desktop' (desktop apps launched at '/' or $HOME):
+          allowed to read across all trusted project workspaces, while still blocking
+          memories from explicitly untrusted workspaces.
         - If node.scope == 'project': allowed if node.workspace_id matches or is None.
         """
         if node.scope == "global":
             return self.is_workspace_trusted(workspace_id)
+
+        if workspace_id == "global_desktop" and self.is_workspace_trusted("global_desktop"):
+            return self.is_workspace_trusted(node.workspace_id)
 
         if workspace_id and node.workspace_id:
             if node.workspace_id != workspace_id:

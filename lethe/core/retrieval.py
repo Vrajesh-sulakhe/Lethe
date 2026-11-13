@@ -101,7 +101,22 @@ _PROFILE_USER_RE = re.compile(
 _GENERIC_QUERY_WORDS = frozenset({
     "number", "name", "info", "information", "details", "detail",
     "secret", "give", "tell", "show", "my", "the",
+    "which", "who", "whom", "whose", "where", "when", "why", "how",
+    "did", "does", "done", "we", "our", "ours", "us", "you", "your", "yours",
+    "me", "them", "their", "theirs", "they", "he", "him", "his", "she", "her",
+    "can", "could", "would", "should", "will", "shall", "may", "might", "must",
+    "have", "has", "had", "been", "being", "am", "please", "pls", "help",
+    "want", "need", "let", "lets", "just", "some", "any", "more", "about",
+    "with", "from", "into", "btw", "also", "now", "currently", "actually",
+    "really", "very", "lethe", "check", "find", "get",
 })
+
+
+def _query_workspace_filter(target_ws: Optional[str], is_trusted: bool) -> Optional[str]:
+    """Allows global_desktop apps to query across trusted workspaces; per-node trust still applies."""
+    if target_ws == "global_desktop" and is_trusted:
+        return None
+    return target_ws
 
 
 class RecallIntent(str, Enum):
@@ -228,7 +243,7 @@ def retrieve_identity_candidates(
     """Retrieves user identity and personal profile memories safely across tools."""
     nodes = db.list_memories(
         as_of_time=as_of_time,
-        workspace_id=target_ws,
+        workspace_id=_query_workspace_filter(target_ws, is_trusted),
         is_trusted=is_trusted,
         branch=target_branch,
         order_desc=True,
@@ -260,7 +275,7 @@ def retrieve_browse_candidates(
     """Retrieves newest accessible memories ranked cleanly by recency."""
     nodes = db.list_memories(
         as_of_time=as_of_time,
-        workspace_id=target_ws,
+        workspace_id=_query_workspace_filter(target_ws, is_trusted),
         is_trusted=is_trusted,
         branch=target_branch,
         order_desc=True,
@@ -315,6 +330,8 @@ def retrieve_specific_candidates(
     """Runs hybrid relational + semantic + FTS5 retrieval with epistemic term coverage gate."""
     merged: Dict[str, Tuple[MemoryNode, float]] = {}
 
+    query_ws = _query_workspace_filter(target_ws, is_trusted)
+
     if entity_filter:
         parts = entity_filter.split(".")
         if len(parts) == 2:
@@ -322,7 +339,7 @@ def retrieve_specific_candidates(
                 parts[0],
                 parts[1],
                 as_of_time=as_of_time,
-                workspace_id=target_ws,
+                workspace_id=query_ws,
                 is_trusted=is_trusted,
                 branch=target_branch,
             )
@@ -334,7 +351,7 @@ def retrieve_specific_candidates(
         query,
         top_k=search_k,
         min_score=0.0,
-        workspace_id=target_ws,
+        workspace_id=query_ws,
         session_id=session_id,
         include_ephemeral=include_ephemeral,
         as_of_time=as_of_time,
@@ -348,7 +365,7 @@ def retrieve_specific_candidates(
     for node, fts_score in db.search_fts(
         query,
         limit=search_k,
-        workspace_id=target_ws,
+        workspace_id=query_ws,
         as_of_time=as_of_time,
         is_trusted=is_trusted,
         branch=target_branch,
@@ -377,7 +394,7 @@ def retrieve_specific_candidates(
         if not is_visible_memory(node, target_ws, security, as_of_time, session_id, include_ephemeral):
             continue
         cov = _calculate_term_coverage(specific_q_words, node)
-        if (score >= 0.99 or cov >= 0.30) and score >= min_relevance:
+        if (score >= 0.99 or cov >= 0.25) and score >= min_relevance:
             combined = score if score >= 0.99 else (0.65 * score + 0.35 * cov)
             qualified.append((node, combined))
 
@@ -403,7 +420,7 @@ def assemble_session_context(
         remaining_context_tokens=remaining_context_tokens,
     )
     nodes = db.list_memories(
-        workspace_id=target_ws,
+        workspace_id=_query_workspace_filter(target_ws, is_trusted),
         is_trusted=is_trusted,
         branch=target_branch,
         order_desc=True,

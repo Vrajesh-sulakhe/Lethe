@@ -20,12 +20,15 @@ def get_current_workspace_id(start_path: Path | str = ".") -> str:
     """
     Resolves the active workspace identifier.
     Traverses upwards to find the enclosing git repository root, or falls back to
-    the directory name (or 'global_desktop' when rooted at '/' or drive root).
+    the directory name (or 'global_desktop' when rooted at '/', drive root, or $HOME).
     """
     p = Path(start_path).resolve()
+    home = Path.home().resolve()
     for parent in [p] + list(p.parents):
         if (parent / ".git").exists() and parent.name:
             return parent.name
+    if p == home:
+        return "global_desktop"
     return p.name or "global_desktop"
 
 

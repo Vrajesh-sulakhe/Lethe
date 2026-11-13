@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 from lethe.core.engine import LetheMemory
 from lethe.models import MemoryStatus, StorageTier
+from lethe.storage.db import get_current_workspace_id
 from lethe.platform.setup import (
     build_mcp_credentials,
     format_mcp_credentials,
@@ -669,8 +670,73 @@ def cmd_rollback(args):
     }, indent=2))
 
 
+def cmd_turn(args):
+    with _open_memory(args, workspace_id=get_current_workspace_id(os.getcwd())) as memory:
+        result = memory.process_turn(args.message, client_id=args.client, token_budget=args.max_tokens)
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    print(result["context_text"])
+
+
+def _read_hook_payload() -> dict:
+    """Reads the JSON event a client hook (e.g. Claude Code) pipes on stdin; never raises."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read()
+        data = json.loads(raw) if raw.strip() else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _hook_turn(args) -> None:
+    payload = _read_hook_payload()
+    message = getattr(args, "message", None) or payload.get("prompt") or payload.get("user_prompt") or ""
+    if not message.strip():
+        return
+    cwd = payload.get("cwd") or os.getcwd()
+    with _open_memory(args, workspace_id=get_current_workspace_id(cwd)) as memory:
+        result = memory.process_turn(
+            message,
+            client_id=args.client,
+            session_id=payload.get("session_id"),
+            token_budget=args.max_tokens,
+        )
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    if result["is_abstention"] and not result["captured"]:
+        return
+    print("[Lethe memory: background context for this message. Use silently; do not ask to save facts, Lethe already did.]")
+    print(result["context_text"])
+
+
+def _hook_boot(args) -> None:
+    payload = _read_hook_payload()
+    cwd = payload.get("cwd") or os.getcwd()
+    with _open_memory(args, workspace_id=get_current_workspace_id(cwd)) as memory:
+        result = memory.process_turn("lethe", client_id=args.client, token_budget=args.max_tokens)
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    if result["is_abstention"]:
+        return
+    print("[Lethe memory: what you already know about this user and their work across tools. Use silently.]")
+    print(result["context_text"])
+
+
 def cmd_hook(args):
-    if getattr(args, "hook_action", None) == "inject":
+    action = getattr(args, "hook_action", None)
+    if action in ("turn", "boot"):
+        # Hooks must never break or block the host client: swallow all errors.
+        try:
+            (_hook_turn if action == "turn" else _hook_boot)(args)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[lethe hook {action} skipped: {exc}]", file=sys.stderr)
+        return
+    if action == "inject":
         with _open_memory(args) as memory:
             delta = memory.get_sync_delta(
                 client_id=args.client,
@@ -915,6 +981,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_hook_inj.add_argument("--max-tokens", type=int, default=300, help="Strict BPE token limit for injected context")
     p_hook_inj.add_argument("--peek", action="store_true", help="Inspect unread delta without advancing client cursor")
     p_hook_inj.add_argument("--json", action="store_true", help="Output structured SyncDelta JSON")
+    p_hook_turn = hook_sub.add_parser("turn", parents=[common], help="Per-message hook: serve the relevant memory slice and auto-capture durable facts (reads hook JSON on stdin)")
+    p_hook_turn.add_argument("--client", required=True, help="Client ID (e.g. claude-code, cursor, codex)")
+    p_hook_turn.add_argument("--message", help="User message (defaults to the 'prompt' field of stdin hook JSON)")
+    p_hook_turn.add_argument("--max-tokens", type=int, default=600, help="Token budget for injected memory")
+    p_hook_turn.add_argument("--json", action="store_true", help="Output structured JSON")
+    p_hook_boot = hook_sub.add_parser("boot", parents=[common], help="Session-start hook: print the user's memory boot context")
+    p_hook_boot.add_argument("--client", required=True, help="Client ID (e.g. claude-code)")
+    p_hook_boot.add_argument("--max-tokens", type=int, default=800, help="Token budget for boot context")
+    p_hook_boot.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    p_turn = subparsers.add_parser("turn", parents=[common], help="Run one memory turn on a message: recall the relevant slice + auto-capture facts")
+    p_turn.add_argument("message", help="The user message")
+    p_turn.add_argument("--client", default="cli", help="Client ID")
+    p_turn.add_argument("--max-tokens", type=int, default=600, help="Token budget")
+    p_turn.add_argument("--json", action="store_true", help="Output structured JSON")
 
     args = parser.parse_args(argv)
 
@@ -944,6 +1025,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "commit": cmd_commit,
         "rollback": cmd_rollback,
         "hook": cmd_hook,
+        "turn": cmd_turn,
     }
     handler = dispatch.get(args.subcommand)
     if handler:

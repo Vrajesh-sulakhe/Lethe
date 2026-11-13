@@ -8,16 +8,12 @@ RULE_END_MARKER = "<!-- LETHE_MEMORY_RULES:END -->"
 def get_desktop_system_prompt() -> str:
     """Returns copy-pasteable custom instructions for Claude, Gemini, and ChatGPT Desktop."""
     return (
-        "You have persistent cross-tool cognitive memory via the `lethe` MCP server. "
-        "Never ask me to type `lethe_store`, `lethe_recall`, `lethe_branch`, `lethe_commit`, "
-        "`lethe_rollback`, `lethe_inspect`, `lethe_forget`, or `lethe_procedures_list` manually.\n"
-        "- At the start of every new chat—or before answering questions about who I am, "
-        "'recent memories', preferences, what I was eating/doing, or past decisions—silently call `lethe_context` "
-        "(or `lethe_recall`). Never say you don't know without querying Lethe first.\n"
-        "- Whenever I introduce myself (name, handle, role), state preferences (favorite snacks, foods, drinks, setup), "
-        "or share lasting technical/personal facts, SILENTLY CALL `lethe_store` immediately "
-        "(category='user_identity' or 'preferences', scope='global'). "
-        "DO NOT ASK PERMISSION or say 'let me know if you want me to log this'—store it silently in the background!"
+        "You have persistent cross-tool memory via the `lethe` MCP server shared across all my apps and IDEs.\n"
+        "- ON EVERY MESSAGE: Silently call the `lethe` tool FIRST with my exact message as `message` (and your app name as `client`, e.g. `claude-desktop`).\n"
+        "- In that single call, Lethe serves the relevant slice of memory (who I am, my snacks/preferences, active project decisions, cross-tool updates) AND automatically saves any durable facts I mentioned.\n"
+        "- Use the returned memory silently as background truth. NEVER ask 'do you want me to save this?' or wait for commands.\n"
+        "- If I just type `lethe`, pass it straight to `lethe(message='lethe')` (or `lethe_context`) to load my full memory. "
+        "(`lethe_store`, `lethe_recall`, and `lethe_forget` remain available for explicit requests.)"
     )
 
 
@@ -25,18 +21,12 @@ def get_autonomous_memory_markdown() -> str:
     """Returns the bounded autonomous Lethe protocol block for agent instruction files."""
     return (
         "## Lethe Autonomous Cross-Tool Memory\n\n"
-        "Never wait for the user to manually type `lethe_store`, `lethe_recall`, `lethe_branch`, "
-        "`lethe_commit`, `lethe_rollback`, `lethe_inspect`, `lethe_forget`, or `lethe_procedures_list`.\n\n"
-        "1. **Silent Session Boot & Recall**: At the start of conversations—or before answering about "
-        "user identity (`who am i`, `what is my name`), `recent memories`, preferences, what the user was eating or doing, "
-        "or prior work—silently call `lethe_context` (single boot bundle) or `lethe_recall`. Never guess or say you don't know without checking.\n"
-        "2. **Silent Proactive Capture (Zero Permission Gate)**: When the user shares their name/handle/bio "
-        "(`category='user_identity'`, `scope='global'`), preferences, snacks, foods, setup (`category='preferences'`, `scope='global'`), "
-        "or lasting architectural decisions (`category='architecture'`), silently call `lethe_store`. "
-        "**CRITICAL**: NEVER ask the user 'would you like me to log/save this?'—silently execute `lethe_store` in the same turn alongside your normal conversational reply.\n"
-        "3. **Safe Memory Git & Sync**: Check `lethe://sync/latest` and `lethe://handovers/active` when "
-        "resuming cross-tool work; use `lethe_branch`, `lethe_commit`, and `lethe_rollback` to isolate or revert "
-        "speculative memory changes."
+        "**THE ONE RULE — Call `lethe` FIRST on every user message**:\n"
+        "Before replying to ANY user message, call `lethe(message=<user's message verbatim>, client=<your tool name>)`.\n\n"
+        "1. **Automatic Slice Serving**: In one call, `lethe` returns only the relevant slice of memory (identity, preferences, snacks/foods, project decisions, active handovers, and cross-tool deltas). Use it silently as background truth; never say 'I don't know' without checking.\n"
+        "2. **Automatic Zero-Permission Capture**: `lethe` deterministically extracts and saves durable facts from the user's message server-side. **CRITICAL**: NEVER ask the user 'would you like me to log/save this?' and never ask them to type `lethe_store` or `lethe_recall`.\n"
+        "3. **Manual Trigger (`lethe`)**: If the user types `lethe` (or `lethe <question>`), pass it straight to `lethe(message=...)` (or `lethe_context` / `lethe_recall`) to load full cross-tool context.\n"
+        "4. **Advanced Memory Git & Unlearning**: Use `lethe_branch`, `lethe_commit`, and `lethe_rollback` around speculative changes; use `lethe_forget` only when asked to delete a memory; keep `lethe_store` for long explicit notes (`category='architecture'` or `'preferences'`)."
     )
 
 
@@ -94,13 +84,10 @@ def install_cursor_sync_rule(
         "alwaysApply: true\n"
         "---\n\n"
         "# Lethe Autonomous Cross-Tool Memory\n\n"
-        "- **Never wait for manual commands**: Do not ask the user to type `lethe_store`, `lethe_recall`, "
-        "`lethe_branch`, `lethe_commit`, `lethe_rollback`, `lethe_inspect`, or `lethe_forget`.\n"
-        "- **Boot & Sync**: When starting a task or after cross-tool switches (Claude / Antigravity / Codex), "
-        "call `lethe_context` (or `lethe_recall`) and read `lethe://sync/latest` and `lethe://handovers/active`.\n"
-        "- **Silent Capture**: Silently call `lethe_store` for user identity (`category='user_identity'`, "
-        "`scope='global'`), preferences (`category='preferences'`, `scope='global'`), and architectural decisions.\n"
-        "- **Safe Isolation**: Use `lethe_branch`, `lethe_commit`, and `lethe_rollback` around speculative changes.\n"
+        "- **Call `lethe` FIRST on every message**: Pass the user's message verbatim as `message` and `client='cursor'` to get the relevant memory slice AND auto-save durable facts.\n"
+        "- **Never wait for manual commands or ask permission**: Do not ask to save preferences or ask the user to type `lethe_store` or `lethe_recall`.\n"
+        "- **Full Context / Sync**: When the user types `lethe` or starts a cross-tool task, pass it through (or call `lethe_context`) and check `lethe://sync/latest` and `lethe://handovers/active`.\n"
+        "- **Safe Isolation**: Use `lethe_branch`, `lethe_commit`, and `lethe_rollback` around speculative changes; use `lethe_store` only for explicit long architectural notes.\n"
     )
 
     if rule_path.exists() and rule_path.read_text(encoding="utf-8") == desired:
