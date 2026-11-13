@@ -743,10 +743,8 @@ def _ensure_windows_user_path(target_dir: Path) -> bool:
 
 
 def _build_windows_cmd_shim(target_exe: Optional[Path], python_exe: str, module_name: str) -> str:
-    if target_exe and target_exe.exists():
-        launch = f'"{target_exe}"'
-    else:
-        launch = f'"{python_exe}" -m {module_name}'
+    # Always invoke python.exe -m <module> to avoid Windows Device Guard / AppLocker blocking venv executables
+    launch = f'"{python_exe}" -m {module_name}'
     return (
         "@echo off\r\n"
         "setlocal\r\n"
