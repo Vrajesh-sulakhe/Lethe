@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from lethe.models import MemoryNode, MemoryStatus, StorageTier, HandoverPacket
+from lethe.models import MemoryNode, MemoryStatus, StorageTier, HandoverPacket, CodeAnchor
 
 SCHEMA_VERSION = 2
 
@@ -242,6 +242,9 @@ class DatabaseManager:
         }
 
     def save_memory(self, node: MemoryNode) -> None:
+        if node.code_anchor and "code_anchor" not in node.metadata:
+            node.metadata["code_anchor"] = node.code_anchor.model_dump()
+
         with self._lock:
             cursor = self.conn.cursor()
             cursor.execute("""
@@ -451,6 +454,14 @@ class DatabaseManager:
 
     def _row_to_node(self, row: sqlite3.Row) -> MemoryNode:
         keys = row.keys()
+        meta = json.loads(row["metadata_json"])
+        code_anchor = None
+        if "code_anchor" in meta and meta["code_anchor"]:
+            try:
+                code_anchor = CodeAnchor.model_validate(meta["code_anchor"])
+            except Exception:
+                code_anchor = None
+
         return MemoryNode(
             id=row["id"],
             content=row["content"],
@@ -466,7 +477,8 @@ class DatabaseManager:
             parent_ids=json.loads(row["parent_ids_json"]),
             workspace_id=row["workspace_id"] if "workspace_id" in keys else None,
             scope=row["scope"] if "scope" in keys and row["scope"] else "project",
-            metadata=json.loads(row["metadata_json"]),
+            code_anchor=code_anchor,
+            metadata=meta,
         )
 
     def close(self):

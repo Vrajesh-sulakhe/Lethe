@@ -10,6 +10,7 @@ from lethe.models import (
     QueryResult,
     HandoverPacket,
     DeletionReceipt,
+    CodeAnchor,
 )
 from lethe.core.engine import LetheMemory
 from lethe.mcp.server import create_mcp_server
@@ -25,4 +26,5 @@ __all__ = [
     "QueryResult",
     "HandoverPacket",
     "DeletionReceipt",
+    "CodeAnchor",
 ]

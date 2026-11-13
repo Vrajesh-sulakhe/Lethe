@@ -38,6 +38,7 @@ def create_mcp_server(
     """
     server = MCPServer("lethe-memory")
     memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
+    server._lethe_memory = memory
     health = memory.check_health()
     if not health.get("healthy", False):
         memory.close()
@@ -109,6 +110,7 @@ def create_mcp_server(
                 "latency_ms": round(res.latency_ms, 2),
                 "context_text": res.context_text,
                 "conflicts": res.conflicts_detected,
+                "drift_warnings": res.drift_warnings,
             },
             indent=2,
         )
@@ -125,12 +127,27 @@ def create_mcp_server(
         metadata: Optional[Dict[str, Any]] = None,
         parent_ids: Optional[List[str]] = None,
         valid_from: Optional[float] = None,
+        code_file: Optional[str] = None,
+        code_symbol: Optional[str] = None,
+        code_sha: Optional[str] = None,
     ) -> str:
-        """Store fact in relational, semantic, procedural, or ephemeral tier."""
+        """
+        Store fact in relational, semantic, procedural, or ephemeral tier.
+        Optionally anchor the memory to code via code_file, code_symbol, code_sha.
+        """
         try:
             tier_enum = StorageTier(tier.lower())
         except ValueError:
             tier_enum = StorageTier.SEMANTIC
+
+        from lethe.models import CodeAnchor
+        anchor: Optional[CodeAnchor] = None
+        if code_file:
+            anchor = CodeAnchor(
+                file_path=code_file,
+                symbol_name=code_symbol,
+                git_sha=code_sha,
+            )
 
         with memory.db._lock:
             node = memory.store(
@@ -144,19 +161,20 @@ def create_mcp_server(
                 valid_from=valid_from,
                 workspace_id=workspace_id,
                 scope=scope,
+                code_anchor=anchor,
             )
-        return json.dumps(
-            {
-                "status": node.status.value,
-                "tier": node.tier.value,
-                "memory_id": node.id,
-                "trust_level": node.trust_level,
-                "content": node.content,
-                "workspace_id": node.workspace_id,
-                "scope": node.scope,
-            },
-            indent=2,
-        )
+        payload = {
+            "status": node.status.value,
+            "tier": node.tier.value,
+            "memory_id": node.id,
+            "trust_level": node.trust_level,
+            "content": node.content,
+            "workspace_id": node.workspace_id,
+            "scope": node.scope,
+        }
+        if node.code_anchor:
+            payload["code_anchor"] = node.code_anchor.model_dump()
+        return json.dumps(payload, indent=2)
 
     @server.tool()
     def lethe_forget(

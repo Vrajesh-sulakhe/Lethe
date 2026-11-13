@@ -23,6 +23,12 @@ class MemoryStatus(str, Enum):
     TOMBSTONED = "tombstoned"
     QUARANTINED = "quarantined"
 
+class CodeAnchor(BaseModel):
+    file_path: str
+    symbol_name: Optional[str] = None
+    git_sha: Optional[str] = None
+    content_hash: Optional[str] = None
+
 class MemoryNode(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     content: str
@@ -38,6 +44,7 @@ class MemoryNode(BaseModel):
     parent_ids: List[str] = Field(default_factory=list)  # Lineage DAG links
     workspace_id: Optional[str] = None                   # Scoped project/repo identifier
     scope: str = "project"                                # 'project' or 'global'
+    code_anchor: Optional[CodeAnchor] = None             # Decision-to-code drift anchor
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class QueryResult(BaseModel):
@@ -48,6 +55,7 @@ class QueryResult(BaseModel):
     latency_ms: float
     is_abstention: bool = False
     conflicts_detected: List[str] = Field(default_factory=list)
+    drift_warnings: List[str] = Field(default_factory=list)
 
 class HandoverPacket(BaseModel):
     task_id: str

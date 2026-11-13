@@ -113,15 +113,20 @@ def compute_effective_token_budget(
     return budget
 
 
-def format_citation_line(node: MemoryNode, compact: bool = False) -> str:
+def format_citation_line(
+    node: MemoryNode,
+    compact: bool = False,
+    drift_warning: Optional[str] = None,
+) -> str:
     """Canonical single-line provenance citation format shared between KnapsackPacker and LetheMemory."""
+    warning_suffix = f" [DRIFT WARNING: {drift_warning}]" if drift_warning else ""
     if compact:
-        return f"[#{node.id[:6]}|{node.category}|{node.trust_level:.1f}] {node.content}"
+        return f"[#{node.id[:6]}|{node.category}|{node.trust_level:.1f}] {node.content}{warning_suffix}"
     citation = (
         f"[Memory #{node.id[:6]} | Category: {node.category} | "
         f"Source: {node.source_session} ({node.source_origin}) | Trust: {node.trust_level:.1f}]"
     )
-    return f"{citation} {node.content}"
+    return f"{citation} {node.content}{warning_suffix}"
 
 
 class KnapsackPacker:

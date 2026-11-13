@@ -10,6 +10,12 @@ from lethe.models import (
     QueryResult,
     HandoverPacket,
     DeletionReceipt,
+    CodeAnchor,
+)
+from lethe.core.drift import (
+    check_code_drift,
+    compute_file_content_hash,
+    get_git_commit_sha,
 )
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
 from lethe.storage.lineage import LineageManager
@@ -59,9 +65,11 @@ class LetheMemory:
         valid_from: Optional[float] = None,
         workspace_id: Optional[str] = None,
         scope: str = "project",
+        code_anchor: Optional[CodeAnchor | Dict[str, Any]] = None,
     ) -> MemoryNode:
         """
         Stores a memory through the trust gate, bitemporal clock, and lineage DAG.
+        Optionally anchors the memory to a code file, symbol, and git commit SHA.
         """
         if trust_level is None:
             if source == "user_explicit":
@@ -73,7 +81,31 @@ class LetheMemory:
             else:
                 trust_level = 0.1
 
+        resolved_workspace = workspace_id or self.workspace_id
+        anchor_obj: Optional[CodeAnchor] = None
+        if code_anchor:
+            if isinstance(code_anchor, dict):
+                anchor_obj = CodeAnchor.model_validate(code_anchor)
+            elif isinstance(code_anchor, CodeAnchor):
+                anchor_obj = code_anchor
+
+            # Auto-populate content hash or git SHA if file exists and hash is missing
+            if anchor_obj:
+                raw_path = Path(anchor_obj.file_path)
+                file_target = raw_path if raw_path.is_absolute() else (
+                    Path(resolved_workspace) / raw_path if resolved_workspace else raw_path
+                )
+                if file_target.is_file():
+                    if not anchor_obj.content_hash:
+                        anchor_obj.content_hash = compute_file_content_hash(file_target)
+                    if not anchor_obj.git_sha:
+                        anchor_obj.git_sha = get_git_commit_sha(file_target.parent)
+
         now = time.time()
+        node_metadata = metadata.copy() if metadata else {}
+        if anchor_obj:
+            node_metadata["code_anchor"] = anchor_obj.model_dump()
+
         node = MemoryNode(
             id=str(uuid.uuid4()),
             content=content,
@@ -86,9 +118,10 @@ class LetheMemory:
             created_at=now,
             valid_from=valid_from if valid_from is not None else now,
             parent_ids=parent_ids or [],
-            workspace_id=workspace_id or self.workspace_id,
+            workspace_id=resolved_workspace,
             scope=scope,
-            metadata=metadata or {}
+            code_anchor=anchor_obj,
+            metadata=node_metadata,
         )
 
         # 1. Trust Gate Check
@@ -306,6 +339,17 @@ class LetheMemory:
         candidate_list = list(deduped.values())
         any_candidate_conflict = any(n.status == MemoryStatus.CONFLICT for n, _ in candidate_list)
 
+        # Check code drift for candidates anchored to files/symbols
+        drift_warnings: List[str] = []
+        drift_map: Dict[str, str] = {}
+        target_ws = workspace_id or self.workspace_id
+        for node, _ in candidate_list:
+            if node.code_anchor:
+                is_drifted, reason = check_code_drift(node.code_anchor, workspace_dir=target_ws)
+                if is_drifted and reason:
+                    drift_warnings.append(f"Memory #{node.id[:6]}: {reason}")
+                    drift_map[node.id] = reason
+
         verbose_warning = "\n[EPISTEMIC CONFLICT WARNING: Multiple conflicting records exist for this topic.]"
         compact_warning = "[CONFLICT WARNING]"
         banner_to_append = ""
@@ -323,7 +367,7 @@ class LetheMemory:
         packed_memories, _ = self.knapsack.pack(
             candidate_list,
             effective_budget,
-            formatter=lambda n: format_citation_line(n, compact=False),
+            formatter=lambda n: format_citation_line(n, compact=False, drift_warning=drift_map.get(n.id)),
             reserved_tokens=reserved_banner,
         )
         use_compact = False
@@ -332,21 +376,25 @@ class LetheMemory:
             packed_memories, _ = self.knapsack.pack(
                 candidate_list,
                 effective_budget,
-                formatter=lambda n: format_citation_line(n, compact=True),
+                formatter=lambda n: format_citation_line(n, compact=True, drift_warning=drift_map.get(n.id)),
                 reserved_tokens=reserved_banner,
             )
             use_compact = bool(packed_memories)
 
         lines: List[str] = []
         if packed_memories:
-            lines = [format_citation_line(m, compact=use_compact) for m in packed_memories]
+            lines = [
+                format_citation_line(m, compact=use_compact, drift_warning=drift_map.get(m.id))
+                for m in packed_memories
+            ]
         elif effective_budget >= 20:
             # Top verified candidate is individually larger than budget -> deliver a clean bounded slice
             best_node, _ = max(
                 candidate_list,
                 key=lambda pair: (float(pair[1]) * float(pair[0].trust_level))
             )
-            header = f"[#{best_node.id[:6]}|{best_node.category}|{best_node.trust_level:.1f}] "
+            best_drift = f" [DRIFT WARNING: {drift_map[best_node.id]}]" if best_node.id in drift_map else ""
+            header = f"[#{best_node.id[:6]}|{best_node.category}|{best_node.trust_level:.1f}]{best_drift} "
             header_cost = count_tokens(header)
             avail = effective_budget - reserved_banner - header_cost
             if avail >= 6:
@@ -368,6 +416,7 @@ class LetheMemory:
                 tokens_used=count_tokens(abstain_msg),
                 latency_ms=latency,
                 is_abstention=True,
+                drift_warnings=drift_warnings,
             )
 
         conflicts_detected = [
@@ -404,6 +453,7 @@ class LetheMemory:
             latency_ms=latency,
             is_abstention=False,
             conflicts_detected=conflicts_detected,
+            drift_warnings=drift_warnings,
         )
 
     def forget(

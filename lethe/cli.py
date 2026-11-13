@@ -78,6 +78,15 @@ def cmd_store(args):
     if args.entity and args.attribute and args.value is not None:
         metadata = {"entity": args.entity, "attribute": args.attribute, "value": args.value}
 
+    code_anchor = None
+    if getattr(args, "code_file", None):
+        from lethe.models import CodeAnchor
+        code_anchor = CodeAnchor(
+            file_path=args.code_file,
+            symbol_name=getattr(args, "code_symbol", None),
+            git_sha=getattr(args, "code_sha", None),
+        )
+
     with _open_memory(args, workspace_id=args.workspace) as memory:
         node = memory.store(
             content=args.content,
@@ -88,21 +97,20 @@ def cmd_store(args):
             workspace_id=args.workspace,
             scope=args.scope,
             valid_from=args.valid_from,
+            code_anchor=code_anchor,
             metadata=metadata,
         )
-    print(
-        json.dumps(
-            {
-                "action": "STORED",
-                "id": node.id,
-                "status": node.status.value,
-                "tier": node.tier.value,
-                "trust_level": node.trust_level,
-                "workspace_id": node.workspace_id,
-            },
-            indent=2,
-        )
-    )
+    output_dict = {
+        "action": "STORED",
+        "id": node.id,
+        "status": node.status.value,
+        "tier": node.tier.value,
+        "trust_level": node.trust_level,
+        "workspace_id": node.workspace_id,
+    }
+    if node.code_anchor:
+        output_dict["code_anchor"] = node.code_anchor.model_dump()
+    print(json.dumps(output_dict, indent=2))
 
 
 def cmd_recall(args):
@@ -127,6 +135,10 @@ def cmd_recall(args):
         print("\nConflicts:")
         for c in res.conflicts_detected:
             print(f"  - {c}")
+    if res.drift_warnings:
+        print("\nDrift Warnings:")
+        for w in res.drift_warnings:
+            print(f"  - {w}")
 
 
 def cmd_procedures(args):
@@ -433,6 +445,9 @@ def main():
     p_store.add_argument("--attribute", default=None, help="Relational attribute key")
     p_store.add_argument("--value", default=None, help="Relational attribute value")
     p_store.add_argument("--valid-from", type=float, default=None, help="Bitemporal valid_from epoch timestamp")
+    p_store.add_argument("--code-file", default=None, help="File path to anchor this architectural decision to")
+    p_store.add_argument("--code-symbol", default=None, help="Function or class symbol name anchored in the file")
+    p_store.add_argument("--code-sha", default=None, help="Explicit Git commit SHA anchor (defaults to HEAD if available)")
 
     # recall command
     p_recall = subparsers.add_parser("recall", parents=[common], help="Recall token-budgeted memories")
