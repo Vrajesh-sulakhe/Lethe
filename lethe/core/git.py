@@ -254,6 +254,7 @@ class MemoryGitManager:
         # Atomic branch state restoration
         with self.db._lock:
             cursor = self.db.conn.cursor()
+            self.db.delete_fts_for_branch(target_branch, include_tombstoned=False)
             cursor.execute(
                 """
                 DELETE FROM lineage_edges

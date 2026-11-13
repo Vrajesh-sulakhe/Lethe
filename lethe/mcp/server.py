@@ -7,8 +7,28 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.subscriptions import ResourceUpdated
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from mcp.types import ToolAnnotations
 from lethe.models import MemoryStatus, StorageTier
 from lethe.core.engine import LetheMemory
+from lethe.mcp.prompts import LETHE_MCP_INSTRUCTIONS, register_lethe_prompts
+
+READ_ONLY_TOOL = ToolAnnotations(
+    read_only_hint=True,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+MUTATING_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+DESTRUCTIVE_TOOL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
 
 def verify_mcp_preflight(
@@ -40,12 +60,7 @@ def create_mcp_server(
     """
     server = MCPServer(
         "lethe-memory",
-        instructions=(
-            "Lethe is your persistent cross-tool cognitive memory across Cursor, Claude Code, "
-            "Antigravity, and Codex. Read lethe://sync/latest and lethe://handovers/active "
-            "for live cross-tool updates, and use Memory Git tools (lethe_branch, lethe_commit, "
-            "lethe_rollback) to isolate or revert experimental memory changes safely."
-        ),
+        instructions=LETHE_MCP_INSTRUCTIONS,
     )
     memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
     server._lethe_memory = memory
@@ -82,14 +97,45 @@ def create_mcp_server(
         }
         return JSONResponse(stats, status_code=200)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_health() -> str:
         """Check Lethe MCP server health, SQLite WAL status, schema version, and storage metrics."""
         with memory.db._lock:
             payload = memory.check_health()
         return json.dumps(payload, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
+    def lethe_context(
+        token_budget: int = 800,
+        workspace_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        remaining_context_tokens: Optional[int] = None,
+        client_id: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+        include_handover: bool = True,
+        mark_read: bool = False,
+    ) -> str:
+        """
+        Boot-strap conversation context in one call: returns global user identity, recent accessible memories,
+        active cross-tool handover packet, and unread sync deltas within strict BPE token budget.
+        Call silently at session start instead of waiting for manual recall commands.
+        """
+        with memory.db._lock:
+            payload = memory.build_session_context(
+                token_budget=token_budget,
+                workspace_id=workspace_id,
+                model_name=model_name,
+                remaining_context_tokens=remaining_context_tokens,
+                client_id=client_id,
+                branch=branch,
+                session_id=session_id,
+                include_handover=include_handover,
+                mark_read=mark_read,
+            )
+        return json.dumps(payload, indent=2)
+
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_recall(
         query: str,
         token_budget: int = 500,
@@ -100,7 +146,12 @@ def create_mcp_server(
         remaining_context_tokens: Optional[int] = None,
         session_id: Optional[str] = None,
     ) -> str:
-        """Recall verified memories within a strict post-format token budget."""
+        """
+        Recall verified memories within a strict post-format token budget.
+        Supports specific search, user identity queries ('who am i', 'what is my name',
+        'what do you know about me'), and browse queries ('recent memories', 'latest', 'everything').
+        Call proactively without waiting for manual user commands.
+        """
         with memory.db._lock:
             res = memory.recall(
                 query,
@@ -125,14 +176,14 @@ def create_mcp_server(
             indent=2,
         )
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_store(
         content: str,
         category: str = "general",
         tier: str = "semantic",
         source: str = "user_explicit",
         workspace_id: Optional[str] = None,
-        scope: str = "project",
+        scope: Optional[str] = None,
         session_id: str = "mcp_session",
         metadata: Optional[Dict[str, Any]] = None,
         parent_ids: Optional[List[str]] = None,
@@ -142,8 +193,10 @@ def create_mcp_server(
         code_sha: Optional[str] = None,
     ) -> str:
         """
-        Store fact in relational, semantic, procedural, or ephemeral tier.
-        Optionally anchor the memory to code via code_file, code_symbol, code_sha.
+        Proactively and silently store durable facts (identity, preferences, architectural decisions,
+        or code anchors) in relational, semantic, procedural, or ephemeral tier.
+        Scope defaults to 'global' for personal/identity/preference categories and Desktop contexts,
+        and 'project' for repository-scoped facts.
         """
         try:
             tier_enum = StorageTier(tier.lower())
@@ -159,6 +212,10 @@ def create_mcp_server(
                 git_sha=code_sha,
             )
 
+        effective_scope = scope
+        if effective_scope is None and workspace_id is None and memory.workspace_id == "global_desktop":
+            effective_scope = "global"
+
         with memory.db._lock:
             node = memory.store(
                 content=content,
@@ -170,7 +227,7 @@ def create_mcp_server(
                 metadata=metadata,
                 valid_from=valid_from,
                 workspace_id=workspace_id,
-                scope=scope,
+                scope=effective_scope,
                 code_anchor=anchor,
             )
         payload = {
@@ -187,7 +244,7 @@ def create_mcp_server(
             payload["code_anchor"] = node.code_anchor.model_dump()
         return json.dumps(payload, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=DESTRUCTIVE_TOOL)
     def lethe_forget(
         target: str,
         reason: str = "user_deletion_request",
@@ -207,7 +264,7 @@ def create_mcp_server(
             indent=2,
         )
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_handover_export(
         task_id: str,
         task_goal: str,
@@ -236,7 +293,7 @@ def create_mcp_server(
             indent=2,
         )
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_handover_import(task_id: str) -> str:
         """Import a mid-task Handover Packet saved by another agent tool."""
         with memory.db._lock:
@@ -256,14 +313,15 @@ def create_mcp_server(
             indent=2,
         )
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_inspect(
         limit: int = 10,
         status: Optional[str] = None,
         workspace_id: Optional[str] = None,
         tier: Optional[str] = None,
+        scope: Optional[str] = None,
     ) -> str:
-        """Inspect stored memories with status, tier, trust level, and workspace filter."""
+        """Inspect newest stored memories with status, tier, trust level, scope, and workspace filter."""
         target_status = None
         if status:
             try:
@@ -277,13 +335,22 @@ def create_mcp_server(
             except ValueError:
                 pass
 
+        target_ws = workspace_id or memory.workspace_id
+        is_trusted = memory.security.is_workspace_trusted(target_ws)
         with memory.db._lock:
             memories = memory.db.list_memories(
                 status=target_status,
-                workspace_id=workspace_id,
+                workspace_id=target_ws,
                 tier=target_tier,
+                scope=scope,
                 branch=memory.current_branch,
+                is_trusted=is_trusted,
+                order_desc=True,
             )
+            visible_memories = [
+                m for m in memories
+                if memory.security.validate_read(target_ws, m)
+            ]
         output = [
             {
                 "id": m.id[:8],
@@ -296,18 +363,18 @@ def create_mcp_server(
                 "branch": m.branch,
                 "session": m.source_session,
             }
-            for m in memories[:limit]
+            for m in visible_memories[:limit]
         ]
-        return json.dumps({"total_count": len(memories), "items": output}, indent=2)
+        return json.dumps({"total_count": len(visible_memories), "items": output}, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_procedures_list() -> str:
         """List stored Tier 3 Markdown runbooks without loading contents into context."""
         with memory.db._lock:
             procs = memory.list_procedures()
         return json.dumps({"procedures": procs}, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_procedure_read(filename: str) -> str:
         """Read a Tier 3 Markdown runbook on demand."""
         with memory.db._lock:
@@ -316,14 +383,14 @@ def create_mcp_server(
             return json.dumps({"error": f"Procedure '{filename}' not found."}, indent=2)
         return json.dumps({"filename": filename, "content": content}, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_procedure_write(filename: str, content: str) -> str:
         """Save or update a Tier 3 Markdown runbook on disk."""
         with memory.db._lock:
             saved = memory.save_procedure(filename, content)
         return json.dumps({"filename": saved.name, "path": str(saved)}, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=DESTRUCTIVE_TOOL)
     def lethe_flush_ephemeral(
         session_id: Optional[str] = None,
         workspace_id: Optional[str] = None,
@@ -338,7 +405,7 @@ def create_mcp_server(
             )
         return json.dumps(result, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_trust_workspace(workspace_id: str) -> str:
         """Mark a workspace as trusted, permitting cross-repo global memory access."""
         memory.security.trust_workspace(workspace_id)
@@ -348,7 +415,7 @@ def create_mcp_server(
             "trusted": True,
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_untrust_workspace(workspace_id: str) -> str:
         """Mark a workspace as untrusted, isolating it to its private project sandbox."""
         memory.security.untrust_workspace(workspace_id)
@@ -358,7 +425,7 @@ def create_mcp_server(
             "trusted": False,
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_check_workspace_trust(workspace_id: Optional[str] = None) -> str:
         """Check whether a workspace is currently trusted or locked in safe-mode isolation."""
         target = workspace_id or memory.workspace_id
@@ -369,7 +436,7 @@ def create_mcp_server(
             "mode": "trusted" if is_trusted else "isolated_sandbox",
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_dream_candidates(
         category: Optional[str] = None,
         workspace_id: Optional[str] = None,
@@ -387,7 +454,7 @@ def create_mcp_server(
             "clusters": clusters,
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_consolidate(
         parent_ids: List[str],
         summary_content: str,
@@ -426,7 +493,7 @@ def create_mcp_server(
             "parents_marked_historical": mark_parents_historical,
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_verify_ledger() -> str:
         """Mathematically verify the append-only cryptographic ledger and salt-shredding integrity."""
         with memory.db._lock:
@@ -439,7 +506,7 @@ def create_mcp_server(
             "cryptographic_proof": "MERKLE_CHAIN_VALID" if valid else "MERKLE_CHAIN_CORRUPT",
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_branch(
         action: str = "list",
         name: str = "",
@@ -472,7 +539,7 @@ def create_mcp_server(
                 return json.dumps({"action": "BRANCH_DELETED", "name": name}, indent=2)
             return json.dumps({"error": f"Unknown branch action: '{action}'"}, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=MUTATING_TOOL)
     def lethe_commit(message: str = "checkpoint") -> str:
         """Create a deterministic snapshot commit on the active memory branch."""
         with memory.db._lock:
@@ -485,7 +552,7 @@ def create_mcp_server(
             "created_at": c.created_at,
         }, indent=2)
 
-    @server.tool()
+    @server.tool(annotations=DESTRUCTIVE_TOOL)
     def lethe_rollback(target: str) -> str:
         """Roll back the active memory branch to a prior commit ID or HEAD~N while keeping unlearning tombstones intact."""
         with memory.db._lock:
@@ -583,6 +650,7 @@ def create_mcp_server(
             ],
         }, indent=2)
 
+    register_lethe_prompts(server, memory)
     return server
 
 

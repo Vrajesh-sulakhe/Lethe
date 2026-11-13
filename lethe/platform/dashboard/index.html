@@ -65,9 +65,12 @@
         <select id="workspace-select" onchange="onWorkspaceChange(this.value)" class="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 font-mono focus:outline-none focus:border-brand-500">
           <option value="">All Workspaces</option>
         </select>
-        <div class="hidden lg:flex items-center gap-1.5 text-xs">
+        <div id="connected-tools-badges" class="hidden lg:flex flex-wrap items-center gap-1.5 text-xs">
           <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">Cursor</span>
+          <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">Claude Desktop</span>
           <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">Claude Code</span>
+          <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">Gemini Desktop</span>
+          <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">OpenAI Desktop</span>
           <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">Antigravity</span>
           <span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">Codex</span>
         </div>
@@ -190,7 +193,7 @@
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h3 class="font-bold text-white text-base">Shared Memory Store</h3>
-          <p class="text-xs text-slate-400">Live inspection of memories accessible across Claude Code, Cursor, Codex, and Antigravity</p>
+          <p class="text-xs text-slate-400">Live inspection of memories accessible across Claude Desktop, Gemini Desktop, OpenAI Desktop, Claude Code, Cursor, Codex, and Antigravity</p>
         </div>
 
         <!-- Filter Controls -->
@@ -264,6 +267,13 @@
         `PROCEDURAL: ${tc.procedural || 0} (${stats.procedure_count || 0} runbooks)`,
         `EPHEMERAL: ${tc.ephemeral || 0}`,
       ].map(label => `<span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800">${escapeHtml(label)}</span>`).join('');
+
+      const badgeBar = document.getElementById('connected-tools-badges');
+      if (badgeBar && Array.isArray(stats.connected_tools) && stats.connected_tools.length > 0) {
+        badgeBar.innerHTML = stats.connected_tools
+          .map(name => `<span class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">${escapeHtml(name)}</span>`)
+          .join('');
+      }
 
       const select = document.getElementById('workspace-select');
       const known = stats.workspaces || [];

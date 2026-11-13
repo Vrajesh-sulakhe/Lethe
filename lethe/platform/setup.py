@@ -9,6 +9,15 @@ import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from lethe.platform.client_rules import (
+    get_desktop_system_prompt,
+    install_antigravity_rules,
+    install_claude_memory_rules,
+    install_client_rules_for_tools,
+    install_codex_rules,
+    install_cursor_sync_rule,
+)
+
 
 def get_default_home_dir() -> Path:
     """Returns the shared Lethe home directory (~/.lethe)."""
@@ -107,12 +116,35 @@ def generate_mcp_config(
     }
 
 
-def get_known_tool_targets(workspace_dir: Optional[Path] = None) -> Dict[str, List[Path]]:
+DEFAULT_SETUP_TOOLS: tuple[str, ...] = (
+    "cursor",
+    "claude",
+    "claude-desktop",
+    "antigravity",
+    "gemini-desktop",
+    "codex",
+    "openai-desktop",
+    "vscode",
+)
+
+TOOL_ALIASES: Dict[str, str] = {
+    "gemini": "gemini-desktop",
+    "openai": "openai-desktop",
+    "chatgpt": "openai-desktop",
+    "chatgpt-desktop": "openai-desktop",
+    "codex-desktop": "openai-desktop",
+}
+
+
+def get_known_tool_targets(
+    workspace_dir: Optional[Path] = None,
+    home_dir: Optional[Path] = None,
+) -> Dict[str, List[Path]]:
     """
-    Returns candidate configuration file paths for known AI coding tools.
+    Returns candidate configuration file paths for known AI coding and desktop tools.
     Supports both global user configurations and project-local workspace configs.
     """
-    home = Path.home()
+    home = (home_dir or Path.home()).resolve()
     ws = (workspace_dir or Path.cwd()).resolve()
 
     targets: Dict[str, List[Path]] = {
@@ -125,25 +157,52 @@ def get_known_tool_targets(workspace_dir: Optional[Path] = None) -> Dict[str, Li
             home / ".claude" / "mcp.json",
             ws / ".mcp.json",
         ],
+        "claude-desktop": [],
         "antigravity": [
             home / ".gemini" / "antigravity" / "mcp_config.json",
+            home / ".gemini" / "config" / "mcp_config.json",
             ws / ".agent" / "mcp.json",
         ],
+        "gemini-desktop": [],
         "codex": [
             home / ".codex" / "config.toml",
             ws / ".codex" / "config.toml",
         ],
+        "openai-desktop": [],
         "vscode": [
             ws / ".vscode" / "mcp.json",
         ],
     }
 
-    # Add OS-specific VS Code Cline / Roo Code settings path
+    # Add OS-specific Desktop app paths (Claude Desktop, Gemini Desktop, OpenAI / ChatGPT Desktop, VS Code Cline)
     if sys.platform == "darwin":
+        app_support = home / "Library" / "Application Support"
+
+        claude_desktop_mac = app_support / "Claude" / "claude_desktop_config.json"
+        targets["claude-desktop"].append(claude_desktop_mac)
+        targets["claude"].append(claude_desktop_mac)
+
+        targets["gemini-desktop"].extend([
+            app_support / "Gemini" / "gemini_desktop_config.json",
+            app_support / "Gemini" / "mcp_config.json",
+            app_support / "Google" / "Gemini" / "mcp_config.json",
+            home / ".gemini" / "settings.json",
+            home / ".gemini" / "config" / "mcp_config.json",
+            home / ".gemini" / "antigravity" / "mcp_config.json",
+            ws / ".gemini" / "settings.json",
+        ])
+
+        targets["openai-desktop"].extend([
+            app_support / "ChatGPT" / "mcp.json",
+            app_support / "OpenAI" / "ChatGPT" / "mcp.json",
+            app_support / "Codex" / "config.toml",
+            home / ".chatgpt" / "mcp.json",
+            home / ".openai" / "mcp.json",
+            home / ".codex" / "config.toml",
+        ])
+
         cline_path = (
-            home
-            / "Library"
-            / "Application Support"
+            app_support
             / "Code"
             / "User"
             / "globalStorage"
@@ -153,18 +212,87 @@ def get_known_tool_targets(workspace_dir: Optional[Path] = None) -> Dict[str, Li
         )
         targets["vscode"].append(cline_path)
     elif sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            cline_path = (
-                Path(appdata)
-                / "Code"
-                / "User"
-                / "globalStorage"
-                / "saoudrizwan.claude-dev"
-                / "settings"
-                / "cline_mcp_settings.json"
-            )
-            targets["vscode"].append(cline_path)
+        use_env = home_dir is None
+        appdata = os.environ.get("APPDATA") if use_env else None
+        localappdata = os.environ.get("LOCALAPPDATA") if use_env else None
+        roaming = Path(appdata) if appdata else (home / "AppData" / "Roaming")
+        local = Path(localappdata) if localappdata else (home / "AppData" / "Local")
+
+        claude_desktop_win = roaming / "Claude" / "claude_desktop_config.json"
+        targets["claude-desktop"].append(claude_desktop_win)
+        targets["claude"].append(claude_desktop_win)
+
+        msix_desktop = (
+            local
+            / "Packages"
+            / "Claude_pzs8sxrjxfjjc"
+            / "LocalCache"
+            / "Roaming"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
+        targets["claude-desktop"].append(msix_desktop)
+        targets["claude"].append(msix_desktop)
+
+        targets["gemini-desktop"].extend([
+            roaming / "Gemini" / "gemini_desktop_config.json",
+            roaming / "Gemini" / "mcp_config.json",
+            local / "Google" / "Gemini" / "mcp_config.json",
+            home / ".gemini" / "settings.json",
+            home / ".gemini" / "config" / "mcp_config.json",
+            home / ".gemini" / "antigravity" / "mcp_config.json",
+            ws / ".gemini" / "settings.json",
+        ])
+
+        targets["openai-desktop"].extend([
+            roaming / "ChatGPT" / "mcp.json",
+            roaming / "OpenAI" / "ChatGPT" / "mcp.json",
+            roaming / "Codex" / "config.toml",
+            home / ".chatgpt" / "mcp.json",
+            home / ".openai" / "mcp.json",
+            home / ".codex" / "config.toml",
+        ])
+
+        cline_path = (
+            roaming
+            / "Code"
+            / "User"
+            / "globalStorage"
+            / "saoudrizwan.claude-dev"
+            / "settings"
+            / "cline_mcp_settings.json"
+        )
+        targets["vscode"].append(cline_path)
+    else:
+        xdg_cfg = os.environ.get("XDG_CONFIG_HOME") if home_dir is None else None
+        cfg_root = Path(xdg_cfg) if xdg_cfg else (home / ".config")
+
+        claude_desktop_linux = cfg_root / "Claude" / "claude_desktop_config.json"
+        targets["claude-desktop"].append(claude_desktop_linux)
+        targets["claude"].append(claude_desktop_linux)
+
+        targets["gemini-desktop"].extend([
+            cfg_root / "Gemini" / "gemini_desktop_config.json",
+            cfg_root / "Gemini" / "mcp_config.json",
+            cfg_root / "google-gemini" / "mcp_config.json",
+            home / ".gemini" / "settings.json",
+            home / ".gemini" / "config" / "mcp_config.json",
+            home / ".gemini" / "antigravity" / "mcp_config.json",
+            ws / ".gemini" / "settings.json",
+        ])
+
+        targets["openai-desktop"].extend([
+            cfg_root / "ChatGPT" / "mcp.json",
+            cfg_root / "OpenAI" / "ChatGPT" / "mcp.json",
+            cfg_root / "Codex" / "config.toml",
+            home / ".chatgpt" / "mcp.json",
+            home / ".openai" / "mcp.json",
+            home / ".codex" / "config.toml",
+        ])
+
+    # Register convenient aliases pointing to the exact same candidate lists
+    for alias, canonical in TOOL_ALIASES.items():
+        targets[alias] = list(targets[canonical])
 
     return targets
 
@@ -224,7 +352,11 @@ def _merge_toml_mcp_server(
     return updated
 
 
-def detect_installed_tools(workspace_dir: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+def detect_installed_tools(
+    workspace_dir: Optional[Path] = None,
+    home_dir: Optional[Path] = None,
+    include_aliases: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     """
     Inspects candidate locations and returns status for each tool:
     - exists: True if target config file exists on disk
@@ -232,11 +364,14 @@ def detect_installed_tools(workspace_dir: Optional[Path] = None) -> Dict[str, Di
     - is_configured: True if 'lethe' server entry is already present
     """
     ws = (workspace_dir or Path.cwd()).resolve()
-    home = Path.home().resolve()
-    targets = get_known_tool_targets(workspace_dir)
+    home = (home_dir or Path.home()).resolve()
+    targets = get_known_tool_targets(workspace_dir=ws, home_dir=home)
     results: Dict[str, Dict[str, Any]] = {}
 
     for tool_name, paths in targets.items():
+        if not include_aliases and tool_name in TOOL_ALIASES:
+            continue
+
         found_path: Optional[Path] = None
         is_configured = False
 
@@ -254,14 +389,16 @@ def detect_installed_tools(workspace_dir: Optional[Path] = None) -> Dict[str, Di
                     is_configured = _is_lethe_configured(p)
                 break
 
-        # Next check for existing config files in priority order
+        # Next check for existing config files in priority order (preferring already-configured files)
         if not found_path:
-            for p in paths:
-                if p.exists():
+            existing_paths = [p for p in paths if p.exists()]
+            for p in existing_paths:
+                if _is_lethe_configured(p):
                     found_path = p
-                    if _is_lethe_configured(p):
-                        is_configured = True
-                        break
+                    is_configured = True
+                    break
+            if not found_path and existing_paths:
+                found_path = existing_paths[0]
 
         # If file doesn't exist yet, pick the first valid parent directory or default path
         if not found_path:
@@ -350,22 +487,37 @@ def setup_all_tools(
     workspace_dir: Optional[Path] = None,
     use_wrapper: bool = False,
     with_hooks: bool = False,
+    with_rules: bool = False,
+    home_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """
     Discovers and configures all requested or detected tools.
+    Resolves tool aliases (e.g. 'gemini' -> 'gemini-desktop', 'openai'/'chatgpt' -> 'openai-desktop')
+    and avoids writing duplicate entries to the same file path in a single pass.
     """
-    detected = detect_installed_tools(workspace_dir)
-    target_tools = tools or list(detected.keys())
+    detected = detect_installed_tools(
+        workspace_dir=workspace_dir,
+        home_dir=home_dir,
+        include_aliases=True,
+    )
+    target_tools = tools if tools is not None else list(DEFAULT_SETUP_TOOLS)
     outcomes: List[Dict[str, Any]] = []
+    seen_paths: set[str] = set()
 
     for tool in target_tools:
-        if tool not in detected:
+        lookup = tool if tool in detected else TOOL_ALIASES.get(tool, tool)
+        if lookup not in detected:
             continue
 
-        info = detected[tool]
+        info = detected[lookup]
         path = info["path"]
         if not path:
             continue
+
+        resolved_key = str(Path(path).resolve())
+        if tools is None and resolved_key in seen_paths:
+            continue
+        seen_paths.add(resolved_key)
 
         outcome = configure_tool(
             tool_name=tool,
@@ -378,12 +530,26 @@ def setup_all_tools(
         )
         outcomes.append(outcome)
 
-    if with_hooks:
-        if "claude" in target_tools:
-            outcomes.append(install_claude_hooks(db_path=db_path, procedures_dir=procedures_dir, dry_run=dry_run))
-        if "cursor" in target_tools:
-            cur_dir = (workspace_dir / ".cursor") if workspace_dir else (Path.home() / ".cursor")
-            outcomes.append(install_cursor_sync_rule(cursor_dir=cur_dir, dry_run=dry_run))
+    if with_hooks and "claude" in target_tools:
+        settings_file = (home_dir or Path.home()) / ".claude" / "settings.json"
+        outcomes.append(
+            install_claude_hooks(
+                settings_path=settings_file,
+                db_path=db_path,
+                procedures_dir=procedures_dir,
+                dry_run=dry_run,
+            )
+        )
+
+    if with_hooks or with_rules:
+        outcomes.extend(
+            install_client_rules_for_tools(
+                target_tools=target_tools,
+                workspace_dir=workspace_dir,
+                home_dir=home_dir,
+                dry_run=dry_run,
+            )
+        )
 
     return outcomes
 
@@ -405,8 +571,9 @@ def build_mcp_credentials(
     lethe_cmd: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Generates ready-to-paste MCP connection credentials across JSON (Cursor/Antigravity/Claude),
-    TOML (Codex), and one-line CLI commands for the shared Lethe memory bus.
+    Generates ready-to-paste MCP connection credentials across JSON (Claude Desktop,
+    Gemini Desktop, OpenAI / ChatGPT Desktop, Cursor, Antigravity, Claude Code),
+    TOML (Codex CLI & Desktop), and one-line CLI commands for the shared Lethe memory bus.
     """
     resolved_db = get_default_db_path(db_path)
     resolved_procs = get_default_procedures_dir(procedures_dir)
@@ -421,6 +588,7 @@ def build_mcp_credentials(
     json_snippet = json.dumps({"mcpServers": {"lethe": entry}}, indent=2)
     toml_snippet = _merge_toml_mcp_server("", "lethe", entry).strip()
     launch_cmd = _shell_join([entry["command"], *entry["args"]])
+    targets = get_known_tool_targets()
 
     return {
         "db_path": resolved_db,
@@ -429,7 +597,14 @@ def build_mcp_credentials(
         "json_snippet": json_snippet,
         "toml_snippet": toml_snippet,
         "claude_cli": f"claude mcp add -s user lethe -- {launch_cmd}",
+        "gemini_cli": f"gemini mcp add lethe {launch_cmd}",
         "codex_cli": f"codex mcp add lethe -- {launch_cmd}",
+        "desktop_config_paths": {
+            "claude_desktop": str(targets["claude-desktop"][0]),
+            "gemini_desktop": str(targets["gemini-desktop"][0]),
+            "openai_desktop": str(targets["openai-desktop"][0]),
+        },
+        "desktop_system_prompt": get_desktop_system_prompt(),
     }
 
 
@@ -448,6 +623,7 @@ def format_mcp_credentials(
         use_wrapper=use_wrapper,
         lethe_cmd=lethe_cmd,
     )
+    dpaths = creds["desktop_config_paths"]
     lines = [
         "=" * 80,
         " LETHE MCP CONNECTION CREDENTIALS (UNIVERSAL MEMORY BUS)",
@@ -456,23 +632,35 @@ def format_mcp_credentials(
         f" Shared Runbooks (--procedures): {creds['procedures_dir']}",
         f" Command:                       {creds['mcp_entry']['command']}",
         "",
-        " [1] Cursor / Antigravity / Claude Code JSON",
-        "     Cursor:      Settings -> Tools & MCP -> Add new global MCP server",
-        "     Antigravity: Manage MCP Servers -> View raw config",
+        " [1] Desktop & IDE JSON (Claude Desktop / Gemini Desktop / ChatGPT / Cursor / Antigravity)",
+        f"     Claude Desktop:  {dpaths['claude_desktop']}",
+        f"     Gemini Desktop:  {dpaths['gemini_desktop']} (or ~/.gemini/settings.json)",
+        f"     OpenAI Desktop:  {dpaths['openai_desktop']} (or ~/.codex/config.toml)",
+        "     Cursor:          Settings -> Tools & MCP -> Add new global MCP server",
+        "     Antigravity:     Manage MCP Servers -> View raw config",
         "-" * 80,
         creds["json_snippet"],
         "",
-        " [2] Codex CLI / Desktop TOML (~/.codex/config.toml)",
+        " [2] OpenAI Codex CLI / Desktop TOML (~/.codex/config.toml)",
         "-" * 80,
         creds["toml_snippet"],
         "",
         " [3] One-Line Terminal Commands",
         "-" * 80,
         f" Claude Code: {creds['claude_cli']}",
+        f" Gemini CLI:  {creds['gemini_cli']}",
         f" Codex:       {creds['codex_cli']}",
         "",
-        " Or auto-wire all detected tools at once:",
+        " Or auto-wire all detected CLI & Desktop tools at once:",
         "   lethe setup",
+        "   lethe setup --tool claude-desktop",
+        "   lethe setup --tool gemini-desktop",
+        "   lethe setup --tool openai-desktop",
+        "   lethe setup --with-hooks    # also install Claude hooks + autonomous client rules",
+        "",
+        " [4] Autonomous Desktop Custom Instructions (Claude / Gemini / ChatGPT Projects)",
+        "-" * 80,
+        creds["desktop_system_prompt"],
         "=" * 80,
     ]
     return "\n".join(lines)
@@ -749,42 +937,6 @@ def install_claude_hooks(
         "command": hook_cmd,
     }
 
-
-def install_cursor_sync_rule(
-    cursor_dir: Optional[Path | str] = None,
-    dry_run: bool = False,
-) -> Dict[str, Any]:
-    """
-    Writes a lightweight Cursor workspace rule instructing Cursor to surface
-    Lethe's reactive MCP resources (lethe://sync/latest, lethe://handovers/active).
-    """
-    base_dir = Path(cursor_dir) if cursor_dir else (Path.home() / ".cursor")
-    rule_path = base_dir / "rules" / "lethe-sync.mdc"
-    desired = (
-        "---\n"
-        "description: Automatic cross-tool memory synchronization with Lethe MCP\n"
-        "alwaysApply: true\n"
-        "---\n\n"
-        "# Lethe Cross-Tool Reactive Sync\n\n"
-        "- When starting a task or after cross-tool switches (Claude Code / Antigravity / Codex), "
-        "read `lethe://sync/latest` and `lethe://handovers/active` to stay aligned on recent decisions.\n"
-        "- Store lasting architectural decisions via `lethe_store` and isolate risky experiments via `lethe_branch`.\n"
-    )
-
-    if rule_path.exists() and rule_path.read_text(encoding="utf-8") == desired:
-        status = "already_configured"
-    elif dry_run:
-        status = "dry_run"
-    else:
-        rule_path.parent.mkdir(parents=True, exist_ok=True)
-        rule_path.write_text(desired, encoding="utf-8")
-        status = "configured"
-
-    return {
-        "tool": "cursor_sync_rule",
-        "path": str(rule_path),
-        "status": status,
-    }
 
 
 

@@ -124,7 +124,7 @@ uv tool install git+https://github.com/Vrajesh-sulakhe/Lethe.git
 Then run from any terminal folder:
 ```bash
 lethe                # Show the full Lethe CLI menu
-lethe setup          # Auto-wire Cursor, Claude Code, Antigravity, Codex
+lethe setup          # Auto-wire Claude Desktop, Gemini Desktop, OpenAI Desktop, Cursor, Claude Code, Antigravity, Codex
 lethe creds          # Print JSON / TOML / 1-line CLI credentials
 lethe health         # Verify ~/.lethe/lethe.db WAL health
 ```
@@ -176,10 +176,14 @@ pytest tests/ -v
 
 ## Connecting via Model Context Protocol (MCP)
 
-To auto-wire **Cursor**, **Claude Code**, **Antigravity**, and **Codex** to your shared `~/.lethe/` vault:
+To auto-wire **Claude Desktop**, **Gemini Desktop**, **OpenAI / ChatGPT Desktop**, **Cursor**, **Claude Code**, **Antigravity**, and **Codex** to your shared `~/.lethe/` vault:
 
 ```bash
 lethe setup
+# Or target a specific desktop app:
+lethe setup --tool claude-desktop
+lethe setup --tool gemini-desktop
+lethe setup --tool openai-desktop
 # Or print copy-pasteable JSON / TOML / 1-line commands:
 lethe creds
 # Or run the MCP server directly:
@@ -199,12 +203,15 @@ lethe mcp
 ```
 
 Exposed MCP Tools:
-* `lethe_recall(query, token_budget)`: Retrieves verified memories within a token budget.
-* `lethe_store(content, category, tier, source)`: Stores a new fact with trust level verification.
+* `lethe_context(token_budget)`: One-call session boot returning persistent user identity, recent accessible memories, active handover, and sync delta within budget.
+* `lethe_recall(query, token_budget)`: Retrieves verified memories within a token budget (including identity queries like `"who am i"` and browse queries like `"recent memories"`).
+* `lethe_store(content, category, tier, source)`: Proactively stores facts (defaults personal/identity categories and Desktop sessions to `global` scope).
 * `lethe_forget(target, reason)`: Executes cascading unlearning across facts and summaries.
 * `lethe_handover_export(task_id, task_goal)`: Exports mid-task state into an atomic packet.
 * `lethe_handover_import(task_id)`: Resumes work from another agent.
-* `lethe_inspect(limit)`: Views active memories and statuses.
+* `lethe_inspect(limit)`: Views newest memories and statuses.
+
+Run `lethe setup --with-hooks` (or `--with-rules`) to install autonomous memory rules across Claude Code (`~/.claude/CLAUDE.md` + hooks), Cursor (`.cursor/rules/lethe-sync.mdc`), Antigravity (`~/.gemini/GEMINI.md`), and Codex (`~/.codex/AGENTS.md`) so agents never wait for manual `lethe_*` commands. Run `lethe creds` for ready-to-paste Desktop Custom Instructions.
 
 ---
 

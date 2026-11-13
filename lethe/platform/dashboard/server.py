@@ -99,6 +99,33 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
         proc_tier = ProceduralTier(procedures_dir)
         procedures = proc_tier.list_procedures()
 
+        from lethe.platform.setup import detect_installed_tools
+        detected = detect_installed_tools()
+        tool_labels = {
+            "cursor": "Cursor IDE",
+            "claude": "Claude Code",
+            "claude-desktop": "Claude Desktop",
+            "antigravity": "Antigravity",
+            "gemini-desktop": "Gemini Desktop",
+            "codex": "Codex CLI",
+            "openai-desktop": "OpenAI Desktop",
+            "vscode": "VS Code",
+        }
+        configured_labels = [
+            tool_labels.get(k, k)
+            for k, info in detected.items()
+            if info.get("is_configured")
+        ]
+        default_labels = [
+            "Cursor IDE",
+            "Claude Desktop",
+            "Claude Code",
+            "Gemini Desktop",
+            "Antigravity",
+            "OpenAI Desktop",
+            "Codex CLI",
+        ]
+
         return {
             "total_records": len(memories),
             "status_counts": status_counts,
@@ -110,7 +137,16 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
             "baseline_tokens": baseline_tokens,
             "delivered_slice_tokens": slice_tokens,
             "token_savings_pct": savings_pct,
-            "connected_tools": ["Cursor IDE", "Claude Code CLI", "Antigravity Agent", "Codex CLI"],
+            "connected_tools": configured_labels or default_labels,
+            "tool_integrations": {
+                k: {
+                    "label": tool_labels.get(k, k),
+                    "is_configured": bool(info.get("is_configured")),
+                    "exists": bool(info.get("exists")),
+                    "path": str(info.get("path") or ""),
+                }
+                for k, info in detected.items()
+            },
         }
 
     def do_GET(self) -> None:

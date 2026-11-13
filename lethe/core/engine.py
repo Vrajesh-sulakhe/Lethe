@@ -22,6 +22,15 @@ from lethe.core.drift import (
     get_git_commit_sha,
 )
 from lethe.core.git import MemoryGitManager
+from lethe.core.retrieval import (
+    RecallIntent,
+    assemble_session_context,
+    classify_recall_intent,
+    default_scope_for_category,
+    retrieve_browse_candidates,
+    retrieve_identity_candidates,
+    retrieve_specific_candidates,
+)
 from lethe.core.synthesis import MemorySynthesizer
 from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
@@ -85,7 +94,7 @@ class LetheMemory:
         metadata: Optional[Dict[str, Any]] = None,
         valid_from: Optional[float] = None,
         workspace_id: Optional[str] = None,
-        scope: str = "project",
+        scope: Optional[str] = None,
         code_anchor: Optional[CodeAnchor | Dict[str, Any]] = None,
         branch: Optional[str] = None,
     ) -> MemoryNode:
@@ -104,20 +113,22 @@ class LetheMemory:
                 trust_level = 0.1
 
         resolved_workspace = workspace_id or self.workspace_id
+        resolved_scope = default_scope_for_category(category, scope)
 
         # Security validation for workspace and scope
         allowed, _ = self.security.validate_write(
             workspace_id=resolved_workspace,
-            scope=scope,
+            scope=resolved_scope,
             tier=tier,
             trust_level=float(trust_level),
             strict=False,
         )
         if not allowed:
-            if scope == "global":
-                scope = "project"
+            if resolved_scope == "global":
+                resolved_scope = "project"
             if trust_level > 0.8:
                 trust_level = 0.5
+        scope = resolved_scope
         anchor_obj: Optional[CodeAnchor] = None
         if code_anchor:
             if isinstance(code_anchor, dict):
@@ -325,85 +336,52 @@ class LetheMemory:
                 is_abstention=True,
             )
 
-        candidates: List[Tuple[MemoryNode, float]] = []
         target_ws = workspace_id or self.workspace_id
         target_branch = branch or self.current_branch
         is_trusted = self.security.is_workspace_trusted(target_ws)
 
-        # 1. If entity filter provided, check Relational Tier within workspace scope & branch
-        if entity_filter:
-            parts = entity_filter.split(".")
-            if len(parts) == 2:
-                exact_match = self.bitemporal.query_active_attribute(
-                    parts[0],
-                    parts[1],
-                    as_of_time=as_of_time,
-                    workspace_id=workspace_id,
-                    is_trusted=is_trusted,
-                    branch=target_branch,
-                )
-                if exact_match and exact_match.status in (
-                    MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT
-                ):
-                    candidates.append((exact_match, 1.0))
-
-        # 2. Search Semantic Tier with scalable candidate pool for 128K+ corpora
-        search_k = max(40, min(200, effective_budget // 10 + 30))
-        semantic_matches = self.semantic.search(
-            query,
-            top_k=search_k,
-            min_score=0.0,
-            workspace_id=workspace_id,
-            session_id=session_id,
-            include_ephemeral=include_ephemeral,
-            as_of_time=as_of_time,
-            is_trusted=is_trusted,
-            branch=target_branch,
-        )
-        for node, score in semantic_matches:
-            if as_of_time is not None:
-                if node.valid_from > as_of_time or (node.valid_to and node.valid_to <= as_of_time):
-                    continue
-            candidates.append((node, score))
-
-        # Enforce workspace security access validation on all candidate memories
-        candidates = [
-            (node, score)
-            for node, score in candidates
-            if self.security.validate_read(target_ws, node)
-        ]
-
-        # 3. Honest Abstention & Epistemic Term Coverage Gate
-        generic_words = {'number', 'name', 'info', 'information', 'details', 'detail', 'secret', 'give', 'tell', 'show', 'my', 'the'}
-        specific_q_words = [
-            EmbeddingHelper._stem(w)
-            for w in re.findall(r'\b[a-zA-Z0-9_]+\b', query.lower())
-            if w not in EmbeddingHelper.STOP_WORDS and w not in generic_words
-        ]
-        if not specific_q_words:
-            specific_q_words = [
-                EmbeddingHelper._stem(w)
-                for w in re.findall(r'\b[a-zA-Z0-9_]+\b', query.lower())
-                if w not in EmbeddingHelper.STOP_WORDS
-            ]
-
-        def calculate_term_coverage(node: MemoryNode) -> float:
-            if not specific_q_words:
-                return 1.0
-            doc_text = f"[{node.category}] {node.content}"
-            doc_stemmed = ' '.join(
-                EmbeddingHelper._stem(w)
-                for w in re.findall(r'\b[a-zA-Z0-9_]+\b', doc_text.lower())
+        intent, broad_profile = classify_recall_intent(query, entity_filter=entity_filter)
+        if intent == RecallIntent.USER_IDENTITY:
+            qualified_candidates = retrieve_identity_candidates(
+                db=self.db,
+                security=self.security,
+                target_ws=target_ws,
+                target_branch=target_branch,
+                is_trusted=is_trusted,
+                as_of_time=as_of_time,
+                session_id=session_id,
+                include_ephemeral=include_ephemeral,
+                broad_profile=broad_profile,
             )
-            matched = [w for w in specific_q_words if w in doc_stemmed]
-            return len(matched) / len(specific_q_words)
-
-        qualified_candidates: List[Tuple[MemoryNode, float]] = []
-        for node, score in candidates:
-            cov = calculate_term_coverage(node)
-            if (score >= 0.99 or cov >= 0.30) and score >= min_relevance:
-                combined_score = score if score >= 0.99 else (0.65 * score + 0.35 * cov)
-                qualified_candidates.append((node, combined_score))
+        elif intent == RecallIntent.BROWSE_RECENT:
+            qualified_candidates = retrieve_browse_candidates(
+                db=self.db,
+                security=self.security,
+                target_ws=target_ws,
+                target_branch=target_branch,
+                is_trusted=is_trusted,
+                as_of_time=as_of_time,
+                session_id=session_id,
+                include_ephemeral=include_ephemeral,
+                limit=max(40, min(150, effective_budget // 8 + 20)),
+            )
+        else:
+            qualified_candidates = retrieve_specific_candidates(
+                query=query,
+                db=self.db,
+                bitemporal=self.bitemporal,
+                semantic=self.semantic,
+                security=self.security,
+                target_ws=target_ws,
+                target_branch=target_branch,
+                is_trusted=is_trusted,
+                effective_budget=effective_budget,
+                min_relevance=min_relevance,
+                as_of_time=as_of_time,
+                entity_filter=entity_filter,
+                session_id=session_id,
+                include_ephemeral=include_ephemeral,
+            )
 
         if not qualified_candidates:
             latency = (time.perf_counter() - start_time) * 1000.0
@@ -867,6 +845,78 @@ class LetheMemory:
             token_count=tokens,
             formatted_text=formatted,
         )
+
+    def build_session_context(
+        self,
+        token_budget: int = 800,
+        workspace_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        remaining_context_tokens: Optional[int] = None,
+        client_id: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+        include_handover: bool = True,
+        mark_read: bool = False,
+    ) -> Dict[str, Any]:
+        """Builds a BPE-budgeted session boot context bundle across identity, recent memories, and sync state."""
+        target_ws = workspace_id or self.workspace_id
+        target_branch = branch or self.current_branch
+        is_trusted = self.security.is_workspace_trusted(target_ws)
+
+        ctx = assemble_session_context(
+            db=self.db,
+            security=self.security,
+            packer=self.knapsack,
+            target_ws=target_ws,
+            target_branch=target_branch,
+            token_budget=token_budget,
+            model_name=model_name,
+            remaining_context_tokens=remaining_context_tokens,
+            session_id=session_id,
+        )
+
+        active_hp = None
+        if include_handover and is_trusted:
+            hp = self.db.get_latest_handover_packet(branch=target_branch)
+            if hp:
+                active_hp = {
+                    "task_id": hp.task_id,
+                    "task_goal": hp.task_goal,
+                    "branch": hp.branch,
+                    "active_memory_count": len(hp.active_memory_ids),
+                    "epistemic_state": hp.epistemic_state,
+                    "created_at": hp.created_at,
+                }
+
+        sync_info = None
+        if client_id:
+            delta = self.get_sync_delta(
+                client_id=client_id,
+                max_tokens=min(200, max(60, ctx["effective_token_budget"] // 4)),
+                peek=not mark_read,
+            )
+            sync_info = {
+                "client_id": delta.client_id,
+                "unread_count": len(delta.events),
+                "last_audit_id": delta.last_audit_id,
+                "latest_audit_id": delta.latest_audit_id,
+                "formatted_text": delta.formatted_text,
+            }
+
+        return {
+            "status": "READY" if ctx["recent_memories"] or active_hp else "EMPTY",
+            "workspace_id": target_ws,
+            "trusted": is_trusted,
+            "branch": target_branch,
+            "effective_token_budget": ctx["effective_token_budget"],
+            "tokens_used": ctx["tokens_used"],
+            "identity_memories": ctx["identity_memories"],
+            "recent_memories": ctx["recent_memories"],
+            "context_text": ctx["context_text"],
+            "active_handover": active_hp,
+            "sync_delta": sync_info,
+            "drift_warnings": ctx["drift_warnings"],
+        }
 
     def check_health(self) -> Dict[str, Any]:
         """

@@ -30,8 +30,10 @@ class LetheDoctor:
         # 2. Cryptographic Ledger Chain
         ledger_check = self._check_ledger()
         checks["ledger"] = ledger_check
-        if ledger_check["status"] != "PASS":
+        if ledger_check["status"] == "FAIL":
             issues.append(f"Ledger error: {ledger_check.get('error')}")
+        elif ledger_check["status"] == "WARN":
+            issues.append(f"Ledger warning: {ledger_check.get('error')}")
 
         # 3. Tombstone Zero-Leakage Audit
         tombstone_check = self._check_tombstones()
@@ -74,7 +76,7 @@ class LetheDoctor:
 
         is_healthy = (
             db_check["status"] == "PASS"
-            and ledger_check["status"] == "PASS"
+            and ledger_check["status"] in ("PASS", "WARN")
             and tombstone_check["status"] == "PASS"
             and drift_check["drifted_count"] == 0
             and conflict_check["count"] == 0
@@ -168,8 +170,20 @@ class LetheDoctor:
     def _check_ledger(self) -> Dict[str, Any]:
         valid, reason = self.memory.ledger.verify_chain()
         count = self.memory.ledger.count_blocks()
+        with self.db._lock:
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM memories")
+            mem_count = int(cursor.fetchone()[0])
+
+        status = "PASS"
+        if not valid:
+            status = "FAIL"
+        elif count == 0 and mem_count > 0:
+            status = "WARN"
+            reason = f"Ledger has 0 commitment blocks while database contains {mem_count} memory rows"
+
         return {
-            "status": "PASS" if valid else "FAIL",
+            "status": status,
             "total_blocks": count,
             "error": reason,
         }

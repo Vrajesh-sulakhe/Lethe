@@ -261,15 +261,16 @@ def cmd_setup(args):
         procedures_dir=resolved_procs,
         use_wrapper=use_wrapper,
         with_hooks=getattr(args, "with_hooks", False),
+        with_rules=getattr(args, "with_rules", False),
     )
 
     print(f"\nSuccessfully configured {len(results)} tool integrations (shared vault: {resolved_db}):\n")
     for r in results:
-        print(f" [OK] {r['tool'].upper():<12} -> {r['path']}")
+        print(f" [OK] {r['tool'].upper():<15} -> {r['path']}")
 
     print("=" * 80)
     print(" All selected tools are now wired to Lethe's universal MCP memory bus!")
-    print(" Open Cursor, Claude Code, Antigravity, Codex, or VS Code and restart/reload MCP.")
+    print(" Restart/reload Cursor, Claude Desktop/Code, Gemini Desktop/Antigravity, OpenAI/Codex, or VS Code.")
     print("=" * 80)
 
 
@@ -724,7 +725,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_mcp.add_argument("--check-only", action="store_true", help="Run pre-flight DB & procedure directory health check and exit")
 
     # creds command
-    p_creds = subparsers.add_parser("creds", parents=[common], help="Print copy-pasteable MCP credentials (JSON, TOML, CLI) for Cursor, Antigravity, Claude Code, and Codex")
+    p_creds = subparsers.add_parser("creds", parents=[common], help="Print copy-pasteable MCP credentials (JSON, TOML, CLI) for Claude Desktop, Gemini Desktop, OpenAI Desktop, Cursor, Antigravity, Claude Code, and Codex")
     p_creds.add_argument("--use-wrapper", action="store_true", help="Use lethe.sh / lethe.cmd wrapper instead of direct CLI/Python path")
     p_creds.add_argument("--json", action="store_true", help="Output credentials payload as JSON")
 
@@ -795,12 +796,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     subparsers.add_parser("benchmark", parents=[common], help="Run the token & latency benchmark against full history")
 
     # setup command
-    p_setup = subparsers.add_parser("setup", parents=[common], help="Auto-configure MCP integration for Cursor, Claude Code, Antigravity, Codex, and VS Code")
+    p_setup = subparsers.add_parser("setup", parents=[common], help="Auto-configure MCP integration across Claude Desktop, Gemini Desktop, OpenAI Desktop, Cursor, Claude Code, Antigravity, Codex, and VS Code")
     p_setup.add_argument("--check", action="store_true", help="Inspect and check detected tools without modifying files")
     p_setup.add_argument("--print", dest="print_creds", action="store_true", help="Print copy-pasteable MCP credentials without modifying files")
-    p_setup.add_argument("--tool", default="all", choices=["all", "cursor", "claude", "antigravity", "codex", "vscode"], help="Target specific tool")
+    p_setup.add_argument(
+        "--tool",
+        default="all",
+        choices=[
+            "all",
+            "cursor",
+            "claude",
+            "claude-desktop",
+            "antigravity",
+            "gemini-desktop",
+            "gemini",
+            "codex",
+            "openai-desktop",
+            "openai",
+            "chatgpt",
+            "vscode",
+        ],
+        help="Target specific CLI, IDE, or Desktop app",
+    )
     p_setup.add_argument("--use-wrapper", action="store_true", help="Wire tools using lethe.sh / lethe.cmd wrapper instead of direct CLI/Python path")
-    p_setup.add_argument("--with-hooks", action="store_true", help="Also install optional Claude Code / Cursor reactive sync hooks and rules")
+    p_setup.add_argument("--with-hooks", action="store_true", help="Also install Claude Code hooks and autonomous memory rules across Cursor, Claude, Antigravity, and Codex")
+    p_setup.add_argument("--with-rules", action="store_true", help="Also install autonomous memory rules (CLAUDE.md, GEMINI.md, AGENTS.md, Cursor .mdc) without modifying hooks")
 
     # ui command
     p_ui = subparsers.add_parser("ui", parents=[common], help="Launch the Lethe real-time developer dashboard")

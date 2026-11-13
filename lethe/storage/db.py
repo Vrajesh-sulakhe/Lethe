@@ -3,8 +3,15 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from lethe.models import MemoryNode, MemoryStatus, StorageTier, HandoverPacket, CodeAnchor
+from lethe.storage.fts_index import (
+    delete_fts_entries as _fts_delete_entries,
+    delete_fts_for_branch as _fts_delete_for_branch,
+    ensure_fts_table as _fts_ensure_table,
+    query_fts_memories as _fts_query_memories,
+    sync_fts_node as _fts_sync_node,
+)
 
 SCHEMA_VERSION = 4
 
@@ -12,13 +19,14 @@ SCHEMA_VERSION = 4
 def get_current_workspace_id(start_path: Path | str = ".") -> str:
     """
     Resolves the active workspace identifier.
-    Traverses upwards to find the enclosing git repository root, or falls back to directory name.
+    Traverses upwards to find the enclosing git repository root, or falls back to
+    the directory name (or 'global_desktop' when rooted at '/' or drive root).
     """
     p = Path(start_path).resolve()
     for parent in [p] + list(p.parents):
-        if (parent / ".git").exists():
+        if (parent / ".git").exists() and parent.name:
             return parent.name
-    return p.name
+    return p.name or "global_desktop"
 
 
 class DatabaseManager:
@@ -37,6 +45,7 @@ class DatabaseManager:
         # timeout=30.0 for cross-platform file-locking resilience;
         # check_same_thread=False allows safe usage from MCP/async worker threads under lock
         self._lock = threading.RLock()
+        self._fts_enabled = False
         self.conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         
@@ -71,6 +80,18 @@ class DatabaseManager:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlearning_tombstones'"
             )
             if cursor.fetchone() is not None:
+                cursor.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_fts'"
+                )
+                if cursor.fetchone() is not None:
+                    self._fts_enabled = True
+                    return
+                try:
+                    cursor.execute("BEGIN IMMEDIATE;")
+                except sqlite3.OperationalError:
+                    pass
+                self._fts_enabled = _fts_ensure_table(cursor)
+                self.conn.commit()
                 return
 
         try:
@@ -270,6 +291,7 @@ class DatabaseManager:
         if current_ver < self.SCHEMA_VERSION:
             cursor.execute(f"PRAGMA user_version = {int(self.SCHEMA_VERSION)};")
 
+        self._fts_enabled = _fts_ensure_table(cursor)
         self.conn.commit()
 
     def get_schema_version(self) -> int:
@@ -291,6 +313,33 @@ class DatabaseManager:
             )
             self.conn.commit()
 
+    def _run_integrity_check(self, cursor: sqlite3.Cursor) -> str:
+        """
+        Runs PRAGMA quick_check on a fresh snapshot connection for file-backed WAL DBs
+        to prevent SQLite FTS5 vtab cache skew during concurrent multi-process writes.
+        """
+        db_target = str(self.db_path)
+        if db_target == ":memory:" or db_target.startswith("file::memory:"):
+            cursor.execute("PRAGMA quick_check;")
+            return str(cursor.fetchone()[0]).lower()
+
+        check_conn = sqlite3.connect(db_target, timeout=30.0)
+        try:
+            check_conn.execute("PRAGMA busy_timeout = 30000;")
+            try:
+                check_conn.execute("BEGIN IMMEDIATE;")
+            except sqlite3.OperationalError:
+                pass
+            row = check_conn.execute("PRAGMA quick_check;").fetchone()
+            return str(row[0]).lower() if row else "unknown"
+        finally:
+            if check_conn.in_transaction:
+                try:
+                    check_conn.rollback()
+                except sqlite3.Error:
+                    pass
+            check_conn.close()
+
     def check_health(self, procedures_dir: Optional[Path | str] = None) -> Dict[str, Any]:
         """
         Executes a comprehensive health and readiness check on the SQLite database
@@ -305,8 +354,7 @@ class DatabaseManager:
             cursor.execute("PRAGMA journal_mode;")
             journal_mode = str(cursor.fetchone()[0]).lower()
 
-            cursor.execute("PRAGMA quick_check;")
-            integrity = str(cursor.fetchone()[0]).lower()
+            integrity = self._run_integrity_check(cursor)
 
             cursor.execute("PRAGMA user_version;")
             schema_version = int(cursor.fetchone()[0])
@@ -405,6 +453,7 @@ class DatabaseManager:
                     VALUES (?, ?, 'derived_from', ?)
                 """, (parent_id, node.id, node.created_at))
 
+            _fts_sync_node(cursor, node, self._fts_enabled)
             self.conn.commit()
 
     def get_memory(self, memory_id: str) -> Optional[MemoryNode]:
@@ -431,6 +480,9 @@ class DatabaseManager:
         session_id: Optional[str] = None,
         is_trusted: bool = True,
         branch: Optional[str] = None,
+        scope: Optional[str] = None,
+        limit: Optional[int] = None,
+        order_desc: bool = True,
     ) -> List[MemoryNode]:
         with self._lock:
             cursor = self.conn.cursor()
@@ -444,6 +496,10 @@ class DatabaseManager:
             if category:
                 query += " AND category = ?"
                 params.append(category)
+
+            if scope:
+                query += " AND scope = ?"
+                params.append(scope)
 
             if status:
                 query += " AND status = ?"
@@ -469,6 +525,11 @@ class DatabaseManager:
                     query += " AND workspace_id = ? AND scope != 'global'"
                     params.append(workspace_id)
 
+            query += " ORDER BY created_at DESC, rowid DESC" if order_desc else " ORDER BY created_at ASC, rowid ASC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(max(0, int(limit)))
+
             cursor.execute(query, params)
             rows = cursor.fetchall()
             return [self._row_to_node(r) for r in rows]
@@ -492,15 +553,59 @@ class DatabaseManager:
                     "UPDATE memories SET status = ? WHERE id = ?",
                     (val_status, memory_id)
                 )
+            if val_status in (MemoryStatus.TOMBSTONED.value, MemoryStatus.QUARANTINED.value):
+                _fts_delete_entries(cursor, [memory_id], self._fts_enabled)
             self.conn.commit()
 
     def delete_memory_physical(self, memory_id: str) -> None:
         with self._lock:
             cursor = self.conn.cursor()
+            _fts_delete_entries(cursor, [memory_id], self._fts_enabled)
             cursor.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             cursor.execute("DELETE FROM lineage_edges WHERE parent_id = ? OR child_id = ?", (memory_id, memory_id))
             cursor.execute("DELETE FROM embeddings WHERE memory_id = ?", (memory_id,))
             self.conn.commit()
+
+    def delete_fts_entries(self, memory_ids: List[str]) -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            _fts_delete_entries(cursor, memory_ids, self._fts_enabled)
+            self.conn.commit()
+
+    def delete_fts_for_branch(self, branch: str, include_tombstoned: bool = False) -> None:
+        with self._lock:
+            cursor = self.conn.cursor()
+            _fts_delete_for_branch(cursor, branch, include_tombstoned, self._fts_enabled)
+            self.conn.commit()
+
+    def search_fts(
+        self,
+        query: str,
+        limit: int = 50,
+        workspace_id: Optional[str] = None,
+        as_of_time: Optional[float] = None,
+        is_trusted: bool = True,
+        branch: Optional[str] = "main",
+        category: Optional[str] = None,
+        session_id: Optional[str] = None,
+        include_ephemeral: bool = True,
+    ) -> List[Tuple[MemoryNode, float]]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            return _fts_query_memories(
+                cursor,
+                query=query,
+                row_mapper=self._row_to_node,
+                enabled=self._fts_enabled,
+                limit=limit,
+                workspace_id=workspace_id,
+                as_of_time=as_of_time,
+                is_trusted=is_trusted,
+                branch=branch,
+                category=category,
+                session_id=session_id,
+                include_ephemeral=include_ephemeral,
+            )
 
     def save_embedding(self, memory_id: str, vector: List[float]) -> None:
         with self._lock:
@@ -713,6 +818,7 @@ class DatabaseManager:
     def delete_branch_record(self, name: str) -> None:
         with self._lock:
             cursor = self.conn.cursor()
+            _fts_delete_for_branch(cursor, name, True, self._fts_enabled)
             cursor.execute("DELETE FROM memories WHERE branch = ?", (name,))
             cursor.execute("DELETE FROM handover_packets WHERE branch = ?", (name,))
             cursor.execute("DELETE FROM memory_commits WHERE branch = ?", (name,))
@@ -837,6 +943,7 @@ class DatabaseManager:
             return
         with self._lock:
             cursor = self.conn.cursor()
+            _fts_delete_entries(cursor, list(id_set), self._fts_enabled)
             # 1. Scrub audit_events.details_json entries referencing purged target_ids
             placeholders = ",".join("?" for _ in id_set)
             cursor.execute(

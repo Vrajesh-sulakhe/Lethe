@@ -56,6 +56,8 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "mistral-32k": 32768,
     "gpt-4o": 128000,
     "gpt-4-turbo": 128000,
+    "chatgpt": 128000,
+    "openai-desktop": 200000,
     "o1": 200000,
     "o3": 200000,
     "codex": 192000,
@@ -63,9 +65,11 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "claude-sonnet-4": 200000,
     "claude-opus-4": 200000,
     "claude-code": 200000,
+    "claude-desktop": 200000,
     "cursor": 200000,
     "gemini-2.5-pro": 1048576,
     "gemini-2.5-flash": 1048576,
+    "gemini-desktop": 1048576,
     "antigravity": 1048576,
 }
 

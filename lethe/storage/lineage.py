@@ -105,8 +105,10 @@ class LineageManager:
                     WHERE id = ?
                 """, (timestamp, node_id))
 
-                # 2. Physically purge from embeddings table
+                # 2. Physically purge from embeddings table & FTS5 index
                 cursor.execute("DELETE FROM embeddings WHERE memory_id = ?", (node_id,))
+                if getattr(self.db, "_fts_enabled", False):
+                    cursor.execute("DELETE FROM memories_fts WHERE memory_id = ?", (node_id,))
 
             self.db.conn.commit()
             self.db.record_unlearning_tombstones(tombstone_entries)
