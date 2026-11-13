@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from mcp.server.mcpserver import MCPServer
@@ -317,12 +318,23 @@ def run_mcp_server(
 ) -> None:
     """Runs pre-flight check once inside create_mcp_server and starts the requested transport."""
     server = create_mcp_server(db_path, procedures_dir=procedures_dir)
-    if transport == "sse":
-        server.run(transport="sse", host=host, port=port)
-    elif transport == "streamable-http":
-        server.run(transport="streamable-http", host=host, port=port)
-    else:
-        server.run(transport="stdio")
+    try:
+        if transport == "sse":
+            server.run(transport="sse", host=host, port=port)
+        elif transport == "streamable-http":
+            server.run(transport="streamable-http", host=host, port=port)
+        else:
+            if getattr(sys.stdin, "isatty", lambda: False)():
+                print(
+                    "[lethe] MCP server listening on stdio (waiting for JSON-RPC client input; Ctrl+C to stop).\n"
+                    "[lethe] Tools (Cursor/Claude/Antigravity/Codex) launch this automatically.\n"
+                    "[lethe] Verify readiness: lethe mcp --check-only  |  HTTP mode: lethe mcp --transport streamable-http",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            server.run(transport="stdio")
+    except KeyboardInterrupt:
+        pass
 
 
 def main():

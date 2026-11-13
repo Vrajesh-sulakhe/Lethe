@@ -703,6 +703,31 @@ def test_cli_bare_menu_and_install_cli_dry_run():
         assert not target_bin.exists()
 
 
+def test_run_mcp_server_tty_notice_only_on_interactive_stdin(monkeypatch, capsys):
+    import lethe.mcp.server as mcp_server_mod
+
+    class _DummyServer:
+        def run(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(mcp_server_mod, "create_mcp_server", lambda db_path, procedures_dir: _DummyServer())
+
+    # Pipe mode (MCP client): silent stdout and stderr
+    monkeypatch.setattr(mcp_server_mod.sys.stdin, "isatty", lambda: False)
+    mcp_server_mod.run_mcp_server()
+    captured_pipe = capsys.readouterr()
+    assert captured_pipe.out == ""
+    assert captured_pipe.err == ""
+
+    # Interactive terminal mode (human): helpful stderr notice, silent stdout
+    monkeypatch.setattr(mcp_server_mod.sys.stdin, "isatty", lambda: True)
+    mcp_server_mod.run_mcp_server()
+    captured_tty = capsys.readouterr()
+    assert captured_tty.out == ""
+    assert "MCP server listening on stdio" in captured_tty.err
+
+
+
 
 
 
