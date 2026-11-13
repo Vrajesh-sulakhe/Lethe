@@ -34,16 +34,17 @@ class TrustGateManager:
                     is_suspicious = True
                     break
 
-        # 2. Check if this untrusted source attempts to overwrite a higher-trust existing fact in scope
+        # 2. Check if this untrusted source attempts to overwrite a higher-trust existing fact in scope & branch
         if entity and attribute:
             query = """
                 SELECT * FROM memories
                 WHERE status = 'active'
+                  AND branch = ?
                   AND json_extract(metadata_json, '$.entity') = ?
                   AND json_extract(metadata_json, '$.attribute') = ?
                   AND trust_level >= 0.8
             """
-            params = [entity, attribute]
+            params = [node.branch or "main", entity, attribute]
             if node.workspace_id:
                 query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
                 params.append(node.workspace_id)

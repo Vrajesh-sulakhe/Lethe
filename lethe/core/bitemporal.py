@@ -26,14 +26,15 @@ class BitemporalManager:
             self.db.save_memory(node)
             return []
 
-        # Find existing active memories for the same entity and attribute in scope
+        # Find existing active memories for the same entity and attribute in scope & branch
         query = """
             SELECT * FROM memories
             WHERE status IN ('active', 'conflict')
+              AND branch = ?
               AND json_extract(metadata_json, '$.entity') = ?
               AND json_extract(metadata_json, '$.attribute') = ?
         """
-        params: List[Any] = [entity, attribute]
+        params: List[Any] = [node.branch or "main", entity, attribute]
         if node.workspace_id:
             query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
             params.append(node.workspace_id)
@@ -90,6 +91,7 @@ class BitemporalManager:
         as_of_time: Optional[float] = None,
         workspace_id: Optional[str] = None,
         is_trusted: bool = True,
+        branch: str = "main",
     ) -> Optional[MemoryNode]:
         cursor = self.db.conn.cursor()
         if as_of_time is None:
@@ -99,11 +101,12 @@ class BitemporalManager:
             SELECT * FROM memories
             WHERE json_extract(metadata_json, '$.entity') = ?
               AND json_extract(metadata_json, '$.attribute') = ?
+              AND branch = ?
               AND valid_from <= ?
               AND (valid_to IS NULL OR valid_to > ?)
               AND status IN ('active', 'conflict', 'historical')
         """
-        params: List[Any] = [entity, attribute, as_of_time, as_of_time]
+        params: List[Any] = [entity, attribute, branch or "main", as_of_time, as_of_time]
         if workspace_id:
             if is_trusted:
                 query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"

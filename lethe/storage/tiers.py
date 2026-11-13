@@ -103,15 +103,17 @@ class RelationalTier:
         entity: str,
         attribute: str,
         workspace_id: Optional[str] = None,
+        branch: str = "main",
     ) -> Optional[MemoryNode]:
         cursor = self.db.conn.cursor()
         query = """
             SELECT * FROM memories 
             WHERE status = 'active'
+              AND branch = ?
               AND json_extract(metadata_json, '$.entity') = ?
               AND json_extract(metadata_json, '$.attribute') = ?
         """
-        params: List[Any] = [entity, attribute]
+        params: List[Any] = [branch or "main", entity, attribute]
         if workspace_id:
             query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
             params.append(workspace_id)
@@ -152,12 +154,14 @@ class SemanticTier:
         include_ephemeral: bool = True,
         as_of_time: Optional[float] = None,
         is_trusted: bool = True,
+        branch: str = "main",
     ) -> List[Tuple[MemoryNode, float]]:
         query_vec = EmbeddingHelper.embed(query)
         active_embeddings = self.db.get_all_active_embeddings(
             workspace_id=workspace_id,
             as_of_time=as_of_time,
             is_trusted=is_trusted,
+            branch=branch or "main",
         )
 
         # Filter ephemeral working memory out of cross-session long-term search
