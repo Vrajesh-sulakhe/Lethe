@@ -473,6 +473,15 @@ class DatabaseManager:
                 return None
             return self._row_to_node(row)
 
+    def list_workspaces(self) -> List[str]:
+        """Returns all distinct non-empty workspace identifiers present in the database."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            rows = cursor.execute(
+                "SELECT DISTINCT workspace_id FROM memories WHERE workspace_id IS NOT NULL AND workspace_id != '' ORDER BY workspace_id"
+            ).fetchall()
+            return [r[0] for r in rows if r[0]]
+
     def list_memories(
         self,
         category: Optional[str] = None,

@@ -223,23 +223,50 @@ def extract_durable_facts(message: str, max_facts: int = 8) -> Tuple[List[Captur
 
 
 _LETHE_PREFIX_RE = re.compile(r"^\s*/?lethe\b[\s,:;-]*", re.IGNORECASE)
+_PROJECT_PREFIX_RE = re.compile(r"^(?:project|workspace|for)\s+([a-zA-Z0-9_\-\.]+)(?:\s+(.*))?$", re.IGNORECASE)
 _BOOT_WORDS = frozenset({"", "context", "boot", "status", "load", "sync", "recall", "everything", "all", "memory", "memories", "hi", "hey", "hello", "start"})
 
 
-def parse_lethe_invocation(message: str) -> Tuple[bool, str]:
+class LetheInvocation(tuple):
+    """Backwards-compatible 2-tuple (is_boot, query) with optional workspace_id attribute."""
+
+    is_boot: bool
+    query: str
+    workspace_id: Optional[str]
+
+    def __new__(cls, is_boot: bool, query: str, workspace_id: Optional[str] = None):
+        instance = super().__new__(cls, (is_boot, query))
+        instance.is_boot = is_boot
+        instance.query = query
+        instance.workspace_id = workspace_id
+        return instance
+
+
+def parse_lethe_invocation(message: str) -> LetheInvocation:
     """
     Detects a manual 'lethe ...' invocation typed in chat.
-    Returns (is_boot_request, query_text).
-    - 'lethe' / 'lethe context' / 'lethe recall' -> full boot context.
-    - 'lethe <question>' -> recall for <question>.
-    - anything else -> normal turn on the raw message.
+    Returns LetheInvocation(is_boot, query, workspace_id=...) which behaves as a 2-tuple (is_boot, query).
+    - 'lethe' / 'lethe context' / 'lethe recall' -> (True, "", None)
+    - 'lethe project <name>' / 'lethe for <name>' -> (True, "", "<name>")
+    - 'lethe project <name> <question>' -> (False, "<question>", "<name>")
+    - 'lethe <question>' -> (False, "<question>", None)
+    - anything else -> (False, raw, None)
     """
     raw = (message or "").strip()
     m = _LETHE_PREFIX_RE.match(raw)
     if not m:
-        return False, raw
+        return LetheInvocation(False, raw, None)
     rest = raw[m.end():].strip()
     if rest.lower().strip(" .!?") in _BOOT_WORDS:
-        return True, ""
-    return False, rest
+        return LetheInvocation(True, "", None)
+
+    pm = _PROJECT_PREFIX_RE.match(rest)
+    if pm:
+        explicit_ws = pm.group(1).strip()
+        trailing = (pm.group(2) or "").strip()
+        if not trailing or trailing.lower().strip(" .!?") in _BOOT_WORDS:
+            return LetheInvocation(True, "", explicit_ws)
+        return LetheInvocation(False, trailing, explicit_ws)
+
+    return LetheInvocation(False, rest, None)
 

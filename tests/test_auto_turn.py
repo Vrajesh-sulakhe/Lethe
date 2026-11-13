@@ -49,6 +49,11 @@ def test_extract_durable_facts_and_invocation_parsing():
     assert parse_lethe_invocation("lethe context") == (True, "")
     assert parse_lethe_invocation("lethe what db do we use?") == (False, "what db do we use?")
     assert parse_lethe_invocation("help me build auth") == (False, "help me build auth")
+    assert parse_lethe_invocation("lethe project CryptoPay") == (True, "")
+    assert parse_lethe_invocation("lethe project CryptoPay").workspace_id == "CryptoPay"
+    assert parse_lethe_invocation("lethe for CryptoPay").workspace_id == "CryptoPay"
+    assert parse_lethe_invocation("lethe project CryptoPay what db do we use?") == (False, "what db do we use?")
+    assert parse_lethe_invocation("lethe project CryptoPay what db do we use?").workspace_id == "CryptoPay"
 
 
 def test_cross_tool_turn_cake_and_desktop_visibility(tmp_path):
@@ -87,6 +92,16 @@ def test_cross_tool_turn_cake_and_desktop_visibility(tmp_path):
     boot_slice = cd.process_turn("lethe", client_id="claude-desktop")
     assert boot_slice["is_abstention"] is False
     assert "Vrajeshh" in boot_slice["context_text"]
+
+    project_slice = cd.process_turn("lethe Lethe", client_id="claude-desktop")
+    assert project_slice["is_abstention"] is False
+    assert "SQLite with WAL" in project_slice["context_text"]
+    assert project_slice["workspace_id"] == "Lethe"
+
+    project_for_slice = cd.process_turn("lethe for Lethe", client_id="claude-desktop")
+    assert project_for_slice["is_abstention"] is False
+    assert "SQLite with WAL" in project_for_slice["context_text"]
+    assert project_for_slice["workspace_id"] == "Lethe"
 
     # 3. Switch to Cursor on same workspace with conversational filler words
     cur = LetheMemory(db_path=db_path, procedures_dir=procs, workspace_id="Lethe", security_config_path=sec_cfg)

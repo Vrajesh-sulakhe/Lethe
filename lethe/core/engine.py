@@ -994,7 +994,17 @@ class LetheMemory:
         start = time.perf_counter()
         target_ws = workspace_id or self.workspace_id
         budget = max(80, int(token_budget))
-        is_boot, query = parse_lethe_invocation(message)
+        inv = parse_lethe_invocation(message)
+        is_boot, query = inv.is_boot, inv.query
+        if getattr(inv, "workspace_id", None):
+            target_ws = inv.workspace_id
+        elif not is_boot and query and len(query.split()) == 1:
+            # Check if user typed 'lethe <ProjectName>' matching an existing workspace
+            known = {w.lower(): w for w in self.db.list_workspaces()}
+            if query.lower() in known:
+                target_ws = known[query.lower()]
+                is_boot = True
+                query = ""
 
         sections: List[str] = []
         used_ids: set[str] = set()
