@@ -89,6 +89,7 @@ class BitemporalManager:
         attribute: str,
         as_of_time: Optional[float] = None,
         workspace_id: Optional[str] = None,
+        is_trusted: bool = True,
     ) -> Optional[MemoryNode]:
         cursor = self.db.conn.cursor()
         if as_of_time is None:
@@ -104,8 +105,12 @@ class BitemporalManager:
         """
         params: List[Any] = [entity, attribute, as_of_time, as_of_time]
         if workspace_id:
-            query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
-            params.append(workspace_id)
+            if is_trusted:
+                query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+                params.append(workspace_id)
+            else:
+                query += " AND workspace_id = ? AND scope != 'global'"
+                params.append(workspace_id)
         query += " ORDER BY valid_from DESC LIMIT 1"
 
         cursor.execute(query, params)

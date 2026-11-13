@@ -324,6 +324,37 @@ def create_mcp_server(
             )
         return json.dumps(result, indent=2)
 
+    @server.tool()
+    def lethe_trust_workspace(workspace_id: str) -> str:
+        """Mark a workspace as trusted, permitting cross-repo global memory access."""
+        memory.security.trust_workspace(workspace_id)
+        return json.dumps({
+            "action": "WORKSPACE_TRUSTED",
+            "workspace_id": workspace_id,
+            "trusted": True,
+        }, indent=2)
+
+    @server.tool()
+    def lethe_untrust_workspace(workspace_id: str) -> str:
+        """Mark a workspace as untrusted, isolating it to its private project sandbox."""
+        memory.security.untrust_workspace(workspace_id)
+        return json.dumps({
+            "action": "WORKSPACE_UNTRUSTED",
+            "workspace_id": workspace_id,
+            "trusted": False,
+        }, indent=2)
+
+    @server.tool()
+    def lethe_check_workspace_trust(workspace_id: Optional[str] = None) -> str:
+        """Check whether a workspace is currently trusted or locked in safe-mode isolation."""
+        target = workspace_id or memory.workspace_id
+        is_trusted = memory.security.is_workspace_trusted(target)
+        return json.dumps({
+            "workspace_id": target,
+            "trusted": is_trusted,
+            "mode": "trusted" if is_trusted else "isolated_sandbox",
+        }, indent=2)
+
     return server
 
 

@@ -151,11 +151,13 @@ class SemanticTier:
         session_id: Optional[str] = None,
         include_ephemeral: bool = True,
         as_of_time: Optional[float] = None,
+        is_trusted: bool = True,
     ) -> List[Tuple[MemoryNode, float]]:
         query_vec = EmbeddingHelper.embed(query)
         active_embeddings = self.db.get_all_active_embeddings(
             workspace_id=workspace_id,
             as_of_time=as_of_time,
+            is_trusted=is_trusted,
         )
 
         # Filter ephemeral working memory out of cross-session long-term search

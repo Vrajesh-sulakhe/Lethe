@@ -14,11 +14,13 @@ from lethe.models import (
 )
 from lethe.core.engine import LetheMemory
 from lethe.mcp.server import create_mcp_server
+from lethe.platform.security import WorkspaceSecurityManager
 
 __version__ = "0.2.0"
 __all__ = [
     "LetheMemory",
     "create_mcp_server",
+    "WorkspaceSecurityManager",
     "StorageTier",
     "TrustLevel",
     "MemoryStatus",

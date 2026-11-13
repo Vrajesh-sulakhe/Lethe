@@ -302,6 +302,7 @@ class DatabaseManager:
         workspace_id: Optional[str] = None,
         tier: Optional[StorageTier] = None,
         session_id: Optional[str] = None,
+        is_trusted: bool = True,
     ) -> List[MemoryNode]:
         with self._lock:
             cursor = self.conn.cursor()
@@ -329,8 +330,12 @@ class DatabaseManager:
                 params.extend([as_of_time, as_of_time])
 
             if workspace_id:
-                query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
-                params.append(workspace_id)
+                if is_trusted:
+                    query += " AND (workspace_id = ? OR scope = 'global' OR workspace_id IS NULL)"
+                    params.append(workspace_id)
+                else:
+                    query += " AND workspace_id = ? AND scope != 'global'"
+                    params.append(workspace_id)
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
@@ -387,6 +392,7 @@ class DatabaseManager:
         self,
         workspace_id: Optional[str] = None,
         as_of_time: Optional[float] = None,
+        is_trusted: bool = True,
     ) -> List[Dict[str, Any]]:
         with self._lock:
             cursor = self.conn.cursor()
@@ -412,8 +418,12 @@ class DatabaseManager:
                 params = []
 
             if workspace_id:
-                query += " AND (m.workspace_id = ? OR m.scope = 'global' OR m.workspace_id IS NULL)"
-                params.append(workspace_id)
+                if is_trusted:
+                    query += " AND (m.workspace_id = ? OR m.scope = 'global' OR m.workspace_id IS NULL)"
+                    params.append(workspace_id)
+                else:
+                    query += " AND m.workspace_id = ? AND m.scope != 'global'"
+                    params.append(workspace_id)
 
             cursor.execute(query, params)
             rows = cursor.fetchall()

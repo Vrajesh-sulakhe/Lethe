@@ -384,6 +384,40 @@ def cmd_health(args):
         sys.exit(1)
 
 
+def cmd_trust(args):
+    with _open_memory(args) as memory:
+        if getattr(args, "list", False):
+            trusted = memory.security.list_trusted_workspaces()
+            untrusted = memory.security.list_untrusted_workspaces()
+            print("=" * 80)
+            print(" LETHE WORKSPACE TRUST MANAGER")
+            print("=" * 80)
+            print(f" Trusted Workspaces ({len(trusted)}):")
+            for ws in trusted:
+                print(f"   [+] {ws}")
+            print(f" Untrusted Workspaces ({len(untrusted)}):")
+            for ws in untrusted:
+                print(f"   [-] {ws}")
+            print("=" * 80)
+            return
+
+        if not args.workspace_id:
+            print("Error: Specify a workspace_id or use --list.", file=sys.stderr)
+            sys.exit(1)
+
+        memory.security.trust_workspace(args.workspace_id)
+        print(f"Workspace '{args.workspace_id}' is now TRUSTED (cross-repo global access enabled).")
+
+
+def cmd_untrust(args):
+    if not args.workspace_id:
+        print("Error: Specify a workspace_id.", file=sys.stderr)
+        sys.exit(1)
+    with _open_memory(args) as memory:
+        memory.security.untrust_workspace(args.workspace_id)
+        print(f"Workspace '{args.workspace_id}' is now UNTRUSTED (isolated to private sandbox).")
+
+
 def _configure_console_encoding() -> None:
     """Ensures stdout/stderr never raise UnicodeEncodeError on Windows cp1252/cp437 consoles."""
     for stream in (sys.stdout, sys.stderr):
@@ -514,6 +548,15 @@ def main():
     p_inst.add_argument("--dry-run", action="store_true", help="Inspect installation plan without writing files")
     p_inst.add_argument("--json", action="store_true", help="Output result as JSON")
 
+    # trust command
+    p_trust = subparsers.add_parser("trust", parents=[common], help="Grant trusted cross-repo status to a workspace")
+    p_trust.add_argument("workspace_id", nargs="?", default=None, help="Workspace ID to trust")
+    p_trust.add_argument("--list", action="store_true", help="List all trusted and untrusted workspaces")
+
+    # untrust command
+    p_untrust = subparsers.add_parser("untrust", parents=[common], help="Lock workspace into an untrusted isolated sandbox")
+    p_untrust.add_argument("workspace_id", help="Workspace ID to untrust")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -531,6 +574,8 @@ def main():
         "setup": cmd_setup,
         "ui": cmd_ui,
         "install-cli": cmd_install_cli,
+        "trust": cmd_trust,
+        "untrust": cmd_untrust,
     }
     handler = dispatch.get(args.subcommand)
     if handler:

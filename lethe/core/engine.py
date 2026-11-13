@@ -17,6 +17,7 @@ from lethe.core.drift import (
     compute_file_content_hash,
     get_git_commit_sha,
 )
+from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
 from lethe.storage.lineage import LineageManager
 from lethe.storage.tiers import RelationalTier, SemanticTier, ProceduralTier, EmbeddingHelper
@@ -41,9 +42,19 @@ class LetheMemory:
         db_path: Path | str = "lethe.db",
         procedures_dir: Path | str = "procedures",
         workspace_id: Optional[str] = None,
+        security_config_path: Optional[Path | str] = None,
+        default_trust: bool = True,
     ):
         self.db = DatabaseManager(db_path)
         self.workspace_id = workspace_id or get_current_workspace_id()
+
+        sec_path = security_config_path
+        if sec_path is None and str(db_path) != ":memory:":
+            p = Path(db_path)
+            if p.parent != Path.home() / ".lethe" and p.parent != Path.cwd():
+                sec_path = p.parent / "trusted_workspaces.json"
+
+        self.security = WorkspaceSecurityManager(config_path=sec_path, default_trust=default_trust)
         self.lineage = LineageManager(self.db)
         self.relational = RelationalTier(self.db)
         self.semantic = SemanticTier(self.db)
@@ -82,6 +93,20 @@ class LetheMemory:
                 trust_level = 0.1
 
         resolved_workspace = workspace_id or self.workspace_id
+
+        # Security validation for workspace and scope
+        allowed, _ = self.security.validate_write(
+            workspace_id=resolved_workspace,
+            scope=scope,
+            tier=tier,
+            trust_level=float(trust_level),
+            strict=False,
+        )
+        if not allowed:
+            if scope == "global":
+                scope = "project"
+            if trust_level > 0.8:
+                trust_level = 0.5
         anchor_obj: Optional[CodeAnchor] = None
         if code_anchor:
             if isinstance(code_anchor, dict):
@@ -254,13 +279,19 @@ class LetheMemory:
             )
 
         candidates: List[Tuple[MemoryNode, float]] = []
+        target_ws = workspace_id or self.workspace_id
+        is_trusted = self.security.is_workspace_trusted(target_ws)
 
         # 1. If entity filter provided, check Relational Tier within workspace scope
         if entity_filter:
             parts = entity_filter.split(".")
             if len(parts) == 2:
                 exact_match = self.bitemporal.query_active_attribute(
-                    parts[0], parts[1], as_of_time=as_of_time, workspace_id=workspace_id
+                    parts[0],
+                    parts[1],
+                    as_of_time=as_of_time,
+                    workspace_id=workspace_id,
+                    is_trusted=is_trusted,
                 )
                 if exact_match and exact_match.status in (
                     MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL, MemoryStatus.CONFLICT
@@ -277,12 +308,20 @@ class LetheMemory:
             session_id=session_id,
             include_ephemeral=include_ephemeral,
             as_of_time=as_of_time,
+            is_trusted=is_trusted,
         )
         for node, score in semantic_matches:
             if as_of_time is not None:
                 if node.valid_from > as_of_time or (node.valid_to and node.valid_to <= as_of_time):
                     continue
             candidates.append((node, score))
+
+        # Enforce workspace security access validation on all candidate memories
+        candidates = [
+            (node, score)
+            for node, score in candidates
+            if self.security.validate_read(target_ws, node)
+        ]
 
         # 3. Honest Abstention & Epistemic Term Coverage Gate
         generic_words = {'number', 'name', 'info', 'information', 'details', 'detail', 'secret', 'give', 'tell', 'show', 'my', 'the'}
