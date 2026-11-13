@@ -2,7 +2,9 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import anyio
 from mcp.server.mcpserver import MCPServer
+from mcp.server.subscriptions import ResourceUpdated
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from lethe.models import MemoryStatus, StorageTier
@@ -36,7 +38,15 @@ def create_mcp_server(
     Exposes compact, low-schema-overhead memory tools across all tiers over
     stdio, SSE, and streamable-http transports, plus HTTP /health and /stats endpoints.
     """
-    server = MCPServer("lethe-memory")
+    server = MCPServer(
+        "lethe-memory",
+        instructions=(
+            "Lethe is your persistent cross-tool cognitive memory across Cursor, Claude Code, "
+            "Antigravity, and Codex. Read lethe://sync/latest and lethe://handovers/active "
+            "for live cross-tool updates, and use Memory Git tools (lethe_branch, lethe_commit, "
+            "lethe_rollback) to isolate or revert experimental memory changes safely."
+        ),
+    )
     memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
     server._lethe_memory = memory
     health = memory.check_health()
@@ -270,6 +280,7 @@ def create_mcp_server(
                 status=target_status,
                 workspace_id=workspace_id,
                 tier=target_tier,
+                branch=memory.current_branch,
             )
         output = [
             {
@@ -425,7 +436,223 @@ def create_mcp_server(
             "cryptographic_proof": "MERKLE_CHAIN_VALID" if valid else "MERKLE_CHAIN_CORRUPT",
         }, indent=2)
 
+    @server.tool()
+    def lethe_branch(
+        action: str = "list",
+        name: str = "",
+        target: str = "main",
+        strategy: str = "abort_on_conflict",
+        switch: bool = False,
+    ) -> str:
+        """Manage Memory Git branches: list, create, switch, diff, merge, or delete."""
+        act = (action or "list").lower()
+        with memory.db._lock:
+            if act == "list":
+                return json.dumps({
+                    "active_branch": memory.current_branch,
+                    "branches": [b.model_dump() for b in memory.list_branches()],
+                }, indent=2)
+            if act == "create":
+                info = memory.create_branch(name=name, from_branch=target or None, switch=switch)
+                return json.dumps({"action": "BRANCH_CREATED", "branch": info.model_dump()}, indent=2)
+            if act in ("switch", "checkout"):
+                info = memory.switch_branch(name)
+                return json.dumps({"action": "BRANCH_SWITCHED", "branch": info.model_dump()}, indent=2)
+            if act == "diff":
+                diff = memory.diff_branches(source=name, target=target or "main")
+                return json.dumps(diff, indent=2)
+            if act == "merge":
+                res = memory.merge_branch(source=name, target=target or None, strategy=strategy)
+                return json.dumps(res.model_dump(), indent=2)
+            if act == "delete":
+                memory.delete_branch(name)
+                return json.dumps({"action": "BRANCH_DELETED", "name": name}, indent=2)
+            return json.dumps({"error": f"Unknown branch action: '{action}'"}, indent=2)
+
+    @server.tool()
+    def lethe_commit(message: str = "checkpoint") -> str:
+        """Create a deterministic snapshot commit on the active memory branch."""
+        with memory.db._lock:
+            c = memory.commit(message=message)
+        return json.dumps({
+            "action": "MEMORY_COMMITTED",
+            "commit_id": c.id,
+            "branch": c.branch,
+            "message": c.message,
+            "created_at": c.created_at,
+        }, indent=2)
+
+    @server.tool()
+    def lethe_rollback(target: str) -> str:
+        """Roll back the active memory branch to a prior commit ID or HEAD~N while keeping unlearning tombstones intact."""
+        with memory.db._lock:
+            c = memory.rollback(target=target)
+        return json.dumps({
+            "action": "MEMORY_ROLLED_BACK",
+            "target": target,
+            "new_head_commit": c.id,
+            "branch": c.branch,
+            "message": c.message,
+        }, indent=2)
+
+    # --- Reactive MCP Resources (100% Free & Local Subscription Targets) ---
+
+    @server.resource(
+        "lethe://sync/latest",
+        name="Latest Cross-Tool Sync Delta",
+        description="Live summary of recent cross-tool memory writes, conflicts, branch switches, and active handover.",
+        mime_type="application/json",
+    )
+    def resource_sync_latest() -> str:
+        with memory.db._lock:
+            branch = memory.current_branch
+            delta = memory.get_sync_delta(client_id="mcp_resource_peek", max_tokens=400, peek=True)
+            recent = memory.db.get_audit_events_since(max(0, delta.latest_audit_id - 15), limit=15)
+        return json.dumps({
+            "active_branch": branch,
+            "latest_audit_id": delta.latest_audit_id,
+            "summary_text": delta.formatted_text,
+            "recent_events": recent,
+        }, indent=2)
+
+    @server.resource(
+        "lethe://handovers/active",
+        name="Active Branch Handover Packet",
+        description="Latest serialized task handover packet for the active memory branch.",
+        mime_type="application/json",
+    )
+    def resource_handovers_active() -> str:
+        with memory.db._lock:
+            branch = memory.current_branch
+            pkt = memory.db.get_latest_handover_packet(branch=branch)
+        return json.dumps({
+            "active_branch": branch,
+            "handover": pkt.model_dump() if pkt else None,
+        }, indent=2)
+
+    @server.resource(
+        "lethe://branches",
+        name="Memory Git Branches & Commits",
+        description="All Memory Git branches, active branch pointer, and recent snapshot commits.",
+        mime_type="application/json",
+    )
+    def resource_branches() -> str:
+        with memory.db._lock:
+            branch = memory.current_branch
+            branches = [b.model_dump() for b in memory.list_branches()]
+            commits = [
+                {
+                    "id": c.id,
+                    "branch": c.branch,
+                    "parent_commit_id": c.parent_commit_id,
+                    "message": c.message,
+                    "created_at": c.created_at,
+                }
+                for c in memory.list_commits(branch=branch, limit=15)
+            ]
+        return json.dumps({
+            "active_branch": branch,
+            "branches": branches,
+            "recent_commits": commits,
+        }, indent=2)
+
+    @server.resource(
+        "lethe://conflicts",
+        name="Active Epistemic Conflicts",
+        description="Unresolved bitemporal or cross-tool contradictions on the active memory branch.",
+        mime_type="application/json",
+    )
+    def resource_conflicts() -> str:
+        with memory.db._lock:
+            branch = memory.current_branch
+            conflicts = memory.db.list_memories(status=MemoryStatus.CONFLICT, branch=branch)
+        return json.dumps({
+            "active_branch": branch,
+            "count": len(conflicts),
+            "conflicts": [
+                {
+                    "id": c.id[:8],
+                    "category": c.category,
+                    "content": c.content,
+                    "source": c.source_origin,
+                    "created_at": c.created_at,
+                }
+                for c in conflicts
+            ],
+        }, indent=2)
+
     return server
+
+
+async def poll_db_changes_once(
+    server: MCPServer,
+    memory: LetheMemory,
+    last_data_version: int,
+    last_audit_id: int,
+) -> Dict[str, Any]:
+    """
+    Detects cross-process SQLite WAL writes via PRAGMA data_version + audit_events tail
+    and publishes ResourceUpdated notifications onto server._subscriptions.
+    """
+    with memory.db._lock:
+        curr_data_version = memory.db.get_data_version()
+        curr_audit_id = memory.db.get_max_audit_id()
+        if curr_data_version == last_data_version and curr_audit_id <= last_audit_id:
+            return {
+                "changed": False,
+                "cursor": {
+                    "last_data_version": curr_data_version,
+                    "last_audit_id": curr_audit_id,
+                },
+            }
+        new_events = memory.db.get_audit_events_since(last_audit_id, limit=50)
+
+    uris: List[str] = ["lethe://sync/latest"]
+    for ev in new_events:
+        etype = ev.get("event_type", "")
+        if etype == "HANDOVER_EXPORTED" and "lethe://handovers/active" not in uris:
+            uris.append("lethe://handovers/active")
+        elif etype.startswith("BRANCH_") or etype in ("MEMORY_COMMITTED", "MEMORY_ROLLED_BACK"):
+            if "lethe://branches" not in uris:
+                uris.append("lethe://branches")
+            if "lethe://handovers/active" not in uris:
+                uris.append("lethe://handovers/active")
+        elif etype == "MEMORY_CONFLICT" and "lethe://conflicts" not in uris:
+            uris.append("lethe://conflicts")
+
+    bus = getattr(server, "_subscriptions", None)
+    if bus is not None:
+        for uri in uris:
+            await bus.publish(ResourceUpdated(uri=uri))
+
+    return {
+        "changed": True,
+        "published_uris": uris,
+        "cursor": {
+            "last_data_version": curr_data_version,
+            "last_audit_id": curr_audit_id,
+        },
+    }
+
+
+async def watch_db_changes(
+    server: MCPServer,
+    memory: LetheMemory,
+    poll_interval: float = 1.0,
+) -> None:
+    """Background async watcher polling SQLite WAL state while MCP server runs."""
+    with memory.db._lock:
+        state = {
+            "last_data_version": memory.db.get_data_version(),
+            "last_audit_id": memory.db.get_max_audit_id(),
+        }
+    while True:
+        await anyio.sleep(poll_interval)
+        try:
+            res = await poll_db_changes_once(server, memory, **state)
+            state = res["cursor"]
+        except Exception:
+            pass
 
 
 def run_mcp_server(
@@ -434,26 +661,54 @@ def run_mcp_server(
     transport: str = "stdio",
     host: str = "127.0.0.1",
     port: int = 8000,
+    poll_interval: float = 1.0,
 ) -> None:
-    """Runs pre-flight check once inside create_mcp_server and starts the requested transport."""
+    """Runs pre-flight check once inside create_mcp_server and starts transport + reactive DB watcher."""
     server = create_mcp_server(db_path, procedures_dir=procedures_dir)
+    if transport == "stdio" and getattr(sys.stdin, "isatty", lambda: False)():
+        print(
+            "[lethe] MCP server listening on stdio (waiting for JSON-RPC client input; Ctrl+C to stop).\n"
+            "[lethe] Tools (Cursor/Claude/Antigravity/Codex) launch this automatically.\n"
+            "[lethe] Verify readiness: lethe mcp --check-only  |  HTTP mode: lethe mcp --transport streamable-http",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    # Preserve compatibility with dummy/mock servers lacking async sub-methods
+    if not hasattr(server, "run_stdio_async") or not hasattr(server, "_lethe_memory"):
+        try:
+            if transport == "sse":
+                server.run(transport="sse", host=host, port=port)
+            elif transport == "streamable-http":
+                server.run(transport="streamable-http", host=host, port=port)
+            else:
+                server.run(transport="stdio")
+        except KeyboardInterrupt:
+            pass
+        return
+
+    async def _serve_with_watcher() -> None:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(watch_db_changes, server, server._lethe_memory, poll_interval)
+            try:
+                if transport == "sse":
+                    await server.run_sse_async(host=host, port=port)
+                elif transport == "streamable-http":
+                    await server.run_streamable_http_async(host=host, port=port)
+                else:
+                    await server.run_stdio_async()
+            finally:
+                tg.cancel_scope.cancel()
+
     try:
-        if transport == "sse":
-            server.run(transport="sse", host=host, port=port)
-        elif transport == "streamable-http":
-            server.run(transport="streamable-http", host=host, port=port)
-        else:
-            if getattr(sys.stdin, "isatty", lambda: False)():
-                print(
-                    "[lethe] MCP server listening on stdio (waiting for JSON-RPC client input; Ctrl+C to stop).\n"
-                    "[lethe] Tools (Cursor/Claude/Antigravity/Codex) launch this automatically.\n"
-                    "[lethe] Verify readiness: lethe mcp --check-only  |  HTTP mode: lethe mcp --transport streamable-http",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            server.run(transport="stdio")
+        anyio.run(_serve_with_watcher)
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            server._lethe_memory.close()
+        except Exception:
+            pass
 
 
 def main():
