@@ -192,14 +192,14 @@ def test_mcp_stdio_cwd_root_context_prompts_and_recall(tmp_path):
                 prompt_names = {p.name for p in prompts.prompts}
                 assert {"session_boot", "capture_memory", "resume_handover", "memory_checkpoint"} <= prompt_names
 
-                # Desktop cwd='/' lethe_store defaults scope='global' cleanly
+                # Desktop launch directories do not promote general project facts to global scope.
                 stored_raw = await session.call_tool("lethe_store", {
                     "content": "User prefers concise TypeScript examples.",
                     "category": "general",
                 })
                 stored = json.loads(stored_raw.content[0].text)
                 assert stored["workspace_id"] == "global_desktop"
-                assert stored["scope"] == "global"
+                assert stored["scope"] == "project"
 
                 # Session boot single-call tool returns identity + recent memories
                 ctx_raw = await session.call_tool("lethe_context", {"token_budget": 600})

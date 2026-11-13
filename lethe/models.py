@@ -25,6 +25,7 @@ class MemoryStatus(str, Enum):
 
 class CodeAnchor(BaseModel):
     file_path: str
+    workspace_root: Optional[str] = None
     symbol_name: Optional[str] = None
     git_sha: Optional[str] = None
     content_hash: Optional[str] = None

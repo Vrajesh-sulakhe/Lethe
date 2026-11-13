@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from lethe.core.drift import check_code_drift
+from lethe.core.projects import project_root
 from lethe.core.knapsack import (
     KnapsackPacker,
     compute_effective_token_budget,
@@ -11,6 +12,7 @@ from lethe.core.knapsack import (
 )
 from lethe.models import MemoryNode, MemoryStatus, StorageTier
 from lethe.storage.tiers import EmbeddingHelper
+from lethe.storage.fts_index import searchable_memory_text
 
 CORE_IDENTITY_CATEGORIES = frozenset({
     "user_identity",
@@ -77,12 +79,15 @@ _BROWSE_FILLER_WORDS = frozenset({
     "lethe", "memories", "memory", "recent", "recently", "latest", "newest",
     "last", "all", "everything", "anything", "overview", "summary", "list",
     "show", "give", "tell", "remember", "recall", "updates", "history",
+    "so", "now", "how", "r", "u", "thing", "things", "up", "where",
+    "continue", "status", "progress", "going", "doing", "work", "working",
 })
 
 _STRONG_BROWSE_CUES = frozenset({
     "recent", "recently", "latest", "newest", "memories", "memory",
     "everything", "overview", "remember", "recall", "stored", "saved",
     "summary", "list", "history", "context", "updates", "all",
+    "continue", "status", "progress", "going", "doing",
 })
 
 _SELF_IDENTITY_MARKERS = (
@@ -109,6 +114,10 @@ _GENERIC_QUERY_WORDS = frozenset({
     "want", "need", "let", "lets", "just", "some", "any", "more", "about",
     "with", "from", "into", "btw", "also", "now", "currently", "actually",
     "really", "very", "lethe", "check", "find", "get",
+    "work", "working", "works", "proper", "properly", "yes", "good",
+    "make", "sure", "way", "intend", "intended", "part", "last", "first",
+    "next", "thing", "things", "going", "continue", "identify", "issue",
+    "fix", "add", "for", "if", "then", "not",
 })
 
 
@@ -302,7 +311,7 @@ def _extract_stemmed_tokens(text: str) -> List[str]:
 def _calculate_term_coverage(specific_q_words: List[str], node: MemoryNode) -> float:
     if not specific_q_words:
         return 1.0
-    doc_tokens = set(_extract_stemmed_tokens(f"[{node.category}] {node.content}"))
+    doc_tokens = set(_extract_stemmed_tokens(f"[{node.category}] {searchable_memory_text(node)}"))
     matched = [
         w for w in specific_q_words
         if w in doc_tokens
@@ -394,7 +403,9 @@ def retrieve_specific_candidates(
         if not is_visible_memory(node, target_ws, security, as_of_time, session_id, include_ephemeral):
             continue
         cov = _calculate_term_coverage(specific_q_words, node)
-        if (score >= 0.99 or cov >= 0.25) and score >= min_relevance:
+        matched_terms = round(cov * len(specific_q_words))
+        has_coverage = cov >= 0.25 or (len(specific_q_words) >= 5 and matched_terms >= 2)
+        if (score >= 0.99 or has_coverage) and score >= min_relevance:
             combined = score if score >= 0.99 else (0.65 * score + 0.35 * cov)
             qualified.append((node, combined))
 
@@ -441,10 +452,12 @@ def assemble_session_context(
     drift_warnings: List[str] = []
     for node, _ in candidates:
         if node.code_anchor:
-            is_drifted, reason = check_code_drift(node.code_anchor, workspace_dir=target_ws)
+            root = node.metadata.get("workspace_root") or project_root(db, node.workspace_id)
+            is_drifted, reason = check_code_drift(node.code_anchor, workspace_dir=root)
+            if reason:
+                drift_warnings.append(f"Memory #{node.id[:6]}: {reason}")
             if is_drifted and reason:
                 drift_map[node.id] = reason
-                drift_warnings.append(f"Memory #{node.id[:6]}: {reason}")
 
     packed, _ = packer.pack(
         candidates,

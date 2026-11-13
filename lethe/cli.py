@@ -232,6 +232,21 @@ def cmd_setup(args):
         )
         return
 
+    if getattr(args, "auto_capture", False) or getattr(args, "json", False):
+        try:
+            results = setup_all_tools(
+                tools=[args.tool] if args.tool != "all" else None,
+                db_path=resolved_db, procedures_dir=resolved_procs, use_wrapper=use_wrapper,
+                with_hooks=getattr(args, "with_hooks", False), with_rules=getattr(args, "with_rules", False),
+                workspace_dir=Path(args.workspace_root) if args.workspace_root else None,
+                auto_capture=args.auto_capture, capture_mode=args.capture_mode, dry_run=args.check,
+            )
+            print(json.dumps({"status": "dry_run" if args.check else "completed", "results": results}, indent=2))
+        except Exception as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}))
+            raise SystemExit(1) from exc
+        return
+
     print("=" * 80)
     print(" LETHE CROSS-TOOL INTEGRATION HUB: ZERO-CONFIG SETUP")
     print("=" * 80)
@@ -248,7 +263,7 @@ def cmd_setup(args):
             status = (
                 "YES (Connected)"
                 if info["is_configured"]
-                else ("Ready to wire" if info["exists"] else "Will create")
+                else ("Unsupported/manual" if info["path"] is None else ("Ready to wire" if info["exists"] else "Will create"))
             )
             print(f" {name:<15} | {path_str:<42} | {status}")
         print("=" * 80)
@@ -263,15 +278,16 @@ def cmd_setup(args):
         use_wrapper=use_wrapper,
         with_hooks=getattr(args, "with_hooks", False),
         with_rules=getattr(args, "with_rules", False),
+        workspace_dir=Path(args.workspace_root) if getattr(args, "workspace_root", None) else None,
     )
 
-    print(f"\nSuccessfully configured {len(results)} tool integrations (shared vault: {resolved_db}):\n")
+    print(f"\nIntegration results (shared vault: {resolved_db}):\n")
     for r in results:
-        print(f" [OK] {r['tool'].upper():<15} -> {r['path']}")
+        print(f" [{r['status'].upper()}] {r['tool']:<20} -> {r.get('path') or r.get('reason', 'manual setup')}")
 
     print("=" * 80)
-    print(" All selected tools are now wired to Lethe's universal MCP memory bus!")
-    print(" Restart/reload Cursor, Claude Desktop/Code, Gemini Desktop/Antigravity, OpenAI/Codex, or VS Code.")
+    print(" Restart/reload supported clients after configuration changes.")
+    print(" MCP and instruction rules alone do not guarantee automatic capture.")
     print("=" * 80)
 
 
@@ -670,6 +686,96 @@ def cmd_rollback(args):
     }, indent=2))
 
 
+def cmd_capture(args):
+    from lethe.platform.capabilities import capture_capabilities, client_capability
+    from lethe.platform.hooks import (
+        capture_policy, clear_capture_failure, config_path, configure_capture, install_capture_hooks, normalize_event,
+        read_config, read_event, workspace_root,
+    )
+
+    try:
+        action = args.capture_action
+        if action == "capabilities":
+            print(json.dumps({"version": 1, "clients": capture_capabilities()}, indent=2))
+            return
+        event = read_event(sys.stdin) if action == "ingest" else None
+        root_value = getattr(args, "workspace_root", None) or (event or {}).get("workspace_root")
+        if not root_value:
+            raise ValueError("An explicit --workspace-root or event workspace_root is required")
+        root = workspace_root(root_value)
+        config = read_config(root)
+        if action in {"enable", "pause", "resume", "disable"}:
+            client = getattr(args, "client", "generic")
+            mode = getattr(args, "capture_mode", "automatic")
+            capability = client_capability(client)
+            if action == "enable" and client != "generic" and not capability["automatic"]:
+                if mode == "strict":
+                    raise ValueError(f"Strict native capture is unsupported for {client}; use a verified adapter or the generic event interface")
+                print(json.dumps({"status": "manual", "client": client, "capability": capability,
+                                  "message": "No native adapter installed; use capture enable --client generic and emit events explicitly."}, indent=2))
+                return
+            hook_result = None
+            if action == "enable" and capability["automatic"]:
+                hook_result = install_capture_hooks(root, mode, dry_run=True)
+            result = configure_capture(
+                root, action, mode=mode, db_path=args.db, procedures_dir=args.procedures_dir,
+                workspace_id=getattr(args, "workspace_id", None), clients=[capability["client"]],
+            )
+            if hook_result:
+                result["hooks"] = install_capture_hooks(root, mode, client_version=hook_result["client_version"])
+            elif action == "disable":
+                result["hooks"] = install_capture_hooks(root, remove=True)
+            print(json.dumps(result, indent=2))
+            return
+        if config.get("db_path"):
+            args.db = config["db_path"]
+        if config.get("procedures_dir"):
+            args.procedures_dir = config["procedures_dir"]
+        if action == "status":
+            from lethe.core.ingestion import capture_status
+            from lethe.platform.hooks import capture_hook_status
+
+            core = None
+            if config_path(root).exists():
+                with _open_memory(args, workspace_id=config.get("workspace_id")) as memory:
+                    memory.capture_config = capture_policy(root, config)
+                    core = capture_status(memory, workspace_id=config.get("workspace_id"))
+            result = {"version": 1, "status": config["state"], "path": str(config_path(root)),
+                      "config": config, "ingestion": core, "hooks": capture_hook_status(root),
+                      "capabilities": [client_capability(c) for c in config.get("clients", [])]}
+            if core is not None and core.get("ok") is False:
+                result.update(status="error", ok=False)
+        elif action == "scan":
+            if config["state"] != "enabled":
+                print(json.dumps({"status": config["state"], "completed": False, "ok": False}))
+                return
+            from lethe.platform.capture_scan import scan_once
+
+            with _open_memory(args, workspace_id=config.get("workspace_id")) as memory:
+                memory.capture_config = capture_policy(root, config)
+                result = scan_once(memory, str(root), client=getattr(args, "client", "workspace-scan"))
+        else:
+            if config["state"] != "enabled":
+                print(json.dumps({"status": config["state"], "ingested": False}))
+                return
+            from lethe.core.ingestion import ingest_event
+
+            event = normalize_event(event, root, config)
+            with _open_memory(args, workspace_id=config.get("workspace_id")) as memory:
+                memory.capture_config = capture_policy(root, config)
+                result = ingest_event(memory, event)
+            if not isinstance(result, dict):
+                raise ValueError("Ingestion returned an invalid acknowledgment")
+            if result.get("ok") is True:
+                clear_capture_failure(root, event)
+        print(json.dumps(result, indent=2))
+        if result.get("status") in {"error", "failed"} or result.get("ok") is False:
+            raise SystemExit(1)
+    except Exception as exc:
+        print(json.dumps({"status": "error", "error": str(exc), "error_type": type(exc).__name__}))
+        raise SystemExit(1) from exc
+
+
 def cmd_turn(args):
     with _open_memory(args, workspace_id=get_current_workspace_id(os.getcwd())) as memory:
         result = memory.process_turn(args.message, client_id=args.client, token_budget=args.max_tokens)
@@ -872,8 +978,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "all",
             "cursor",
             "claude",
+            "claude-code",
             "claude-desktop",
             "antigravity",
+            "gemini-cli",
             "gemini-desktop",
             "gemini",
             "codex",
@@ -884,6 +992,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         ],
         help="Target specific CLI, IDE, or Desktop app",
     )
+    p_setup.add_argument("--auto-capture", action="store_true", help="Install a verified native capture adapter in an explicit workspace")
+    p_setup.add_argument("--capture-mode", choices=["automatic", "strict"], default="automatic")
+    p_setup.add_argument("--workspace-root", default=None, help="Explicit workspace root for capture configuration and local hooks")
+    p_setup.add_argument("--json", action="store_true", help="Output structured integration results")
     p_setup.add_argument("--use-wrapper", action="store_true", help="Wire tools using lethe.sh / lethe.cmd wrapper instead of direct CLI/Python path")
     p_setup.add_argument("--with-hooks", action="store_true", help="Also install Claude Code hooks and autonomous memory rules across Cursor, Claude, Antigravity, and Codex")
     p_setup.add_argument("--with-rules", action="store_true", help="Also install autonomous memory rules (CLAUDE.md, GEMINI.md, AGENTS.md, Cursor .mdc) without modifying hooks")
@@ -991,6 +1103,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_hook_boot.add_argument("--max-tokens", type=int, default=800, help="Token budget for boot context")
     p_hook_boot.add_argument("--json", action="store_true", help="Output structured JSON")
 
+    p_capture = subparsers.add_parser("capture", parents=[common], help="Explicit workspace capture and client-independent JSON events")
+    capture_sub = p_capture.add_subparsers(dest="capture_action", required=True)
+    capture_sub.add_parser("capabilities", help="Report documented versus implemented client adapters")
+    for action in ("ingest", "status", "enable", "pause", "resume", "disable", "scan"):
+        capture_parser = capture_sub.add_parser(action, parents=[common])
+        capture_parser.add_argument("--workspace-root", required=action != "ingest", help="Explicit workspace root containing .lethe/capture.json")
+        if action == "enable":
+            capture_parser.add_argument("--client", default="generic", help="generic for explicit events, claude-code for native hooks")
+            capture_parser.add_argument("--capture-mode", choices=["automatic", "strict"], default="automatic")
+            capture_parser.add_argument("--workspace-id", default=None)
+        elif action == "scan":
+            capture_parser.add_argument("--client", default="workspace-scan", help="Client identifier recorded in scan receipts")
+
     p_turn = subparsers.add_parser("turn", parents=[common], help="Run one memory turn on a message: recall the relevant slice + auto-capture facts")
     p_turn.add_argument("message", help="The user message")
     p_turn.add_argument("--client", default="cli", help="Client ID")
@@ -1025,6 +1150,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "commit": cmd_commit,
         "rollback": cmd_rollback,
         "hook": cmd_hook,
+        "capture": cmd_capture,
         "turn": cmd_turn,
     }
     handler = dispatch.get(args.subcommand)

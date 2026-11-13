@@ -61,6 +61,19 @@ def ensure_fts_table(cursor: sqlite3.Cursor) -> bool:
         return False
 
 
+def searchable_memory_text(node: MemoryNode) -> str:
+    parts = [node.content, node.workspace_id or ""]
+    if node.code_anchor:
+        parts.append(node.code_anchor.file_path)
+        if node.code_anchor.file_path.lower().endswith((".html", ".htm")):
+            parts.append("HTML page")
+    for key in ("project_name", "artifact_kind", "file_path"):
+        value = node.metadata.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    return " ".join(parts)
+
+
 def sync_fts_node(cursor: sqlite3.Cursor, node: MemoryNode, enabled: bool) -> None:
     """Keeps a single MemoryNode synchronized in the FTS5 index."""
     if not enabled:
@@ -71,7 +84,7 @@ def sync_fts_node(cursor: sqlite3.Cursor, node: MemoryNode, enabled: bool) -> No
         return
     cursor.execute(
         "INSERT INTO memories_fts (memory_id, content, category) VALUES (?, ?, ?)",
-        (node.id, node.content, node.category),
+        (node.id, searchable_memory_text(node), node.category),
     )
 
 

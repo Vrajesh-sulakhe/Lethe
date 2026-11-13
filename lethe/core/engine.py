@@ -33,6 +33,7 @@ from lethe.core.retrieval import (
 )
 from lethe.core.synthesis import MemorySynthesizer
 from lethe.core.capture import extract_durable_facts, parse_lethe_invocation
+from lethe.core.projects import project_root, register_project, resolve_project_query, resolve_visible_project
 from lethe.core.retrieval import GLOBAL_PERSONAL_CATEGORIES
 from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
@@ -99,6 +100,7 @@ class LetheMemory:
         scope: Optional[str] = None,
         code_anchor: Optional[CodeAnchor | Dict[str, Any]] = None,
         branch: Optional[str] = None,
+        workspace_root: Optional[str] = None,
     ) -> MemoryNode:
         """
         Stores a memory through the trust gate, bitemporal clock, and lineage DAG.
@@ -115,6 +117,9 @@ class LetheMemory:
                 trust_level = 0.1
 
         resolved_workspace = workspace_id or self.workspace_id
+        if workspace_root:
+            resolved_workspace = register_project(self.db, workspace_root, workspace_id)
+        resolved_root = workspace_root or project_root(self.db, resolved_workspace)
         resolved_scope = default_scope_for_category(category, scope)
 
         # Security validation for workspace and scope
@@ -140,11 +145,13 @@ class LetheMemory:
 
             # Auto-populate content hash or git SHA if file exists and hash is missing
             if anchor_obj:
+                if resolved_root and not anchor_obj.workspace_root:
+                    anchor_obj = anchor_obj.model_copy(update={"workspace_root": str(resolved_root)})
                 raw_path = Path(anchor_obj.file_path)
                 file_target = raw_path if raw_path.is_absolute() else (
-                    Path(resolved_workspace) / raw_path if resolved_workspace else raw_path
+                    Path(anchor_obj.workspace_root) / raw_path if anchor_obj.workspace_root else None
                 )
-                if file_target.is_file():
+                if file_target is not None and file_target.is_file():
                     if not anchor_obj.content_hash:
                         anchor_obj.content_hash = compute_file_content_hash(file_target)
                     if not anchor_obj.git_sha:
@@ -152,6 +159,8 @@ class LetheMemory:
 
         now = time.time()
         node_metadata = metadata.copy() if metadata else {}
+        if resolved_root:
+            node_metadata["workspace_root"] = str(resolved_root)
         if anchor_obj:
             node_metadata["code_anchor"] = anchor_obj.model_dump()
 
@@ -340,9 +349,16 @@ class LetheMemory:
 
         target_ws = workspace_id or self.workspace_id
         target_branch = branch or self.current_branch
+        target_ws, search_query, ambiguous_projects = resolve_project_query(self, query, target_ws)
+        if ambiguous_projects:
+            text = self._bounded_abstention_text(
+                "Choose a workspace_id; the project name is ambiguous: " + ", ".join(ambiguous_projects), effective_budget
+            )
+            return QueryResult(query=query, memories=[], context_text=text, tokens_used=count_tokens(text),
+                               latency_ms=(time.perf_counter() - start_time) * 1000, is_abstention=True)
         is_trusted = self.security.is_workspace_trusted(target_ws)
 
-        intent, broad_profile = classify_recall_intent(query, entity_filter=entity_filter)
+        intent, broad_profile = classify_recall_intent(search_query, entity_filter=entity_filter)
         if intent == RecallIntent.USER_IDENTITY:
             qualified_candidates = retrieve_identity_candidates(
                 db=self.db,
@@ -369,7 +385,7 @@ class LetheMemory:
             )
         else:
             qualified_candidates = retrieve_specific_candidates(
-                query=query,
+                query=search_query,
                 db=self.db,
                 bitemporal=self.bitemporal,
                 semantic=self.semantic,
@@ -411,12 +427,13 @@ class LetheMemory:
         # Check code drift for candidates anchored to files/symbols
         drift_warnings: List[str] = []
         drift_map: Dict[str, str] = {}
-        target_ws = workspace_id or self.workspace_id
         for node, _ in candidate_list:
             if node.code_anchor:
-                is_drifted, reason = check_code_drift(node.code_anchor, workspace_dir=target_ws)
-                if is_drifted and reason:
+                root = node.metadata.get("workspace_root") or project_root(self.db, node.workspace_id)
+                is_drifted, reason = check_code_drift(node.code_anchor, workspace_dir=root)
+                if reason:
                     drift_warnings.append(f"Memory #{node.id[:6]}: {reason}")
+                if is_drifted and reason:
                     drift_map[node.id] = reason
 
         verbose_warning = "\n[EPISTEMIC CONFLICT WARNING: Multiple conflicting records exist for this topic.]"
@@ -785,8 +802,10 @@ class LetheMemory:
         client_id: str,
         max_tokens: int = 300,
         peek: bool = False,
+        workspace_id: Optional[str] = None,
     ) -> SyncDelta:
         active_branch = self.current_branch
+        target_ws = workspace_id or self.workspace_id
         cursor = self.db.get_sync_cursor(client_id)
         last_id = int(cursor.get("last_audit_id", 0))
         batch_limit = 500
@@ -798,18 +817,21 @@ class LetheMemory:
             else latest_id
         )
 
-        is_trusted = self.security.is_workspace_trusted(self.workspace_id)
-        if not is_trusted:
-            events: List[Dict[str, Any]] = []
-            for ev in raw_events:
-                details = ev.get("details") or {}
-                ev_ws = details.get("workspace_id")
-                ev_scope = details.get("scope")
-                if ev_ws is not None and ev_ws != self.workspace_id and ev_scope != "global":
+        is_trusted = self.security.is_workspace_trusted(target_ws)
+        is_global_view = target_ws in (None, "", "default", "global_desktop")
+        events: List[Dict[str, Any]] = []
+        for ev in raw_events:
+            details = ev.get("details") or {}
+            ev_ws = details.get("workspace_id")
+            ev_scope = details.get("scope")
+            if ev_ws is not None and ev_ws != target_ws:
+                if not is_trusted and ev_scope != "global":
                     continue
-                events.append(ev)
-        else:
-            events = raw_events
+                if not self.security.is_workspace_trusted(ev_ws):
+                    continue
+                if not is_global_view and ev_scope != "global":
+                    continue
+            events.append(ev)
 
         if not events:
             if not peek and cursor_target_id > last_id:
@@ -896,6 +918,7 @@ class LetheMemory:
                 client_id=client_id,
                 max_tokens=min(200, max(60, ctx["effective_token_budget"] // 4)),
                 peek=not mark_read,
+                workspace_id=target_ws,
             )
             sync_info = {
                 "client_id": delta.client_id,
@@ -929,10 +952,11 @@ class LetheMemory:
                 SELECT id FROM memories
                 WHERE status IN ('active', 'conflict')
                   AND json_extract(metadata_json, '$.capture_hash') = ?
+                  AND branch = ?
                   AND (scope = 'global' OR workspace_id IS NULL OR workspace_id = ?)
                 LIMIT 1
                 """,
-                (content_hash, target_ws),
+                (content_hash, self.current_branch, target_ws),
             )
             row = cursor.fetchone()
         return row[0] if row else None
@@ -954,7 +978,7 @@ class LetheMemory:
                 duplicates += 1
                 continue
             scope = None
-            if target_ws == "global_desktop" or fact.category in GLOBAL_PERSONAL_CATEGORIES:
+            if fact.category in GLOBAL_PERSONAL_CATEGORIES:
                 scope = "global"
             node = self.store(
                 content=fact.content,
@@ -994,25 +1018,75 @@ class LetheMemory:
         start = time.perf_counter()
         target_ws = workspace_id or self.workspace_id
         budget = max(80, int(token_budget))
+        def _turn_abstention(text: str) -> Dict[str, Any]:
+            bounded = self._bounded_abstention_text(text, budget)
+            return {
+                "context_text": bounded,
+                "tokens_used": count_tokens(bounded),
+                "is_abstention": True,
+                "captured": [],
+                "duplicates_skipped": 0,
+                "sensitive_skipped": 0,
+                "workspace_id": target_ws,
+                "latency_ms": round((time.perf_counter() - start) * 1000.0, 2),
+            }
+
         inv = parse_lethe_invocation(message)
         is_boot, query = inv.is_boot, inv.query
         if getattr(inv, "workspace_id", None):
-            target_ws = inv.workspace_id
+            matched_ws, ambiguous_ws = resolve_visible_project(self, inv.workspace_id, target_ws)
+            if ambiguous_ws:
+                return _turn_abstention(
+                    "Choose a workspace_id; the project name is ambiguous: " + ", ".join(ambiguous_ws)
+                )
+            if not matched_ws:
+                return _turn_abstention(f"No accessible memory found for project '{inv.workspace_id}'.")
+            target_ws = matched_ws
         elif not is_boot and query and len(query.split()) == 1:
-            # Check if user typed 'lethe <ProjectName>' matching an existing workspace
-            known = {w.lower(): w for w in self.db.list_workspaces()}
-            if query.lower() in known:
-                target_ws = known[query.lower()]
+            # Check if user typed 'lethe <ProjectName>' matching an accessible workspace
+            matched_ws, ambiguous_ws = resolve_visible_project(self, query, target_ws)
+            if ambiguous_ws:
+                return _turn_abstention(
+                    "Choose a workspace_id; the project name is ambiguous: " + ", ".join(ambiguous_ws)
+                )
+            if matched_ws:
+                target_ws = matched_ws
                 is_boot = True
                 query = ""
+
+        if query:
+            selected_ws, selected_query, ambiguous = resolve_project_query(self, query, target_ws)
+            if ambiguous:
+                return _turn_abstention(
+                    "Choose a workspace_id; the project name is ambiguous: " + ", ".join(ambiguous)
+                )
+            target_ws = selected_ws
+            query = selected_query
 
         sections: List[str] = []
         used_ids: set[str] = set()
         abstained = False
 
+        sync_section = ""
+        if include_sync and client_id:
+            delta = self.get_sync_delta(
+                client_id=client_id,
+                max_tokens=min(140, max(40, budget // 4)),
+                workspace_id=target_ws,
+            )
+            if delta.formatted_text:
+                sync_section = "## New from other tools\n" + delta.formatted_text
+
+        sync_cost = count_tokens("\n\n" + sync_section) if sync_section else 0
+        slice_budget = max(50, budget - sync_cost)
+
         if is_boot:
+            boot_header_cost = count_tokens("## Memory\n")
             boot = self.build_session_context(
-                token_budget=budget, workspace_id=target_ws, client_id=client_id, mark_read=bool(client_id)
+                token_budget=max(40, slice_budget - boot_header_cost),
+                workspace_id=target_ws,
+                client_id=None,
+                mark_read=False,
             )
             if boot.get("context_text"):
                 sections.append("## Memory\n" + boot["context_text"])
@@ -1021,15 +1095,17 @@ class LetheMemory:
                 sections.append(f"## Active handover\n- {hp['task_id']}: {hp['task_goal']}")
             abstained = not sections
         else:
-            id_budget = min(160, budget // 3)
-            identity = self.recall("who am i", token_budget=id_budget, workspace_id=target_ws)
+            id_header_cost = count_tokens("## Who the user is\n")
+            id_budget = min(150, max(35, slice_budget // 3))
+            identity = self.recall("who am i", token_budget=max(25, id_budget - id_header_cost), workspace_id=target_ws)
             if not identity.is_abstention:
                 sections.append("## Who the user is\n" + identity.context_text)
                 used_ids.update(m.id for m in identity.memories)
 
-            remaining = budget - (count_tokens("\n\n".join(sections)) if sections else 0)
+            remaining = slice_budget - (count_tokens("\n\n".join(sections)) if sections else 0)
             if query and remaining > 40:
-                rel = self.recall(query[:600], token_budget=remaining, workspace_id=target_ws)
+                rel_header_cost = count_tokens("\n\n## Relevant to this message\n")
+                rel = self.recall(query[:600], token_budget=max(25, remaining - rel_header_cost), workspace_id=target_ws)
                 if rel.is_abstention:
                     abstained = True
                 else:
@@ -1038,13 +1114,50 @@ class LetheMemory:
                         ln for ln in rel.context_text.splitlines()
                         if ln.strip() and not any(tag in ln for tag in seen_tags)
                     ]
+                    used_ids.update(m.id for m in rel.memories)
                     if lines:
                         sections.append("## Relevant to this message\n" + "\n".join(lines))
 
-        if include_sync and client_id:
-            delta = self.get_sync_delta(client_id=client_id, max_tokens=min(150, max(40, budget // 4)))
-            if delta.formatted_text:
-                sections.append("## New from other tools\n" + delta.formatted_text)
+            # Active project slice: when working inside a trusted project workspace,
+            # pack top unincluded project memories within the remaining slice budget.
+            if (
+                target_ws not in (None, "", "default", "global_desktop")
+                and self.security.is_workspace_trusted(target_ws)
+            ):
+                proj_remaining = slice_budget - (count_tokens("\n\n".join(sections)) if sections else 0)
+                proj_header_cost = count_tokens("\n\n## Project context\n")
+                if proj_remaining - proj_header_cost >= 40:
+                    proj_nodes = [
+                        m for m in self.db.list_memories(
+                            workspace_id=target_ws,
+                            is_trusted=True,
+                            branch=self.current_branch,
+                            order_desc=True,
+                            limit=40,
+                        )
+                        if m.workspace_id == target_ws
+                        and m.status in (MemoryStatus.ACTIVE, MemoryStatus.CONFLICT)
+                        and m.id not in used_ids
+                        and self.security.validate_read(target_ws, m)
+                    ]
+                    if proj_nodes:
+                        proj_candidates = [
+                            (m, max(0.60, 0.95 - idx * 0.01))
+                            for idx, m in enumerate(proj_nodes)
+                        ]
+                        packed_proj, _ = self.knapsack.pack(
+                            proj_candidates,
+                            proj_remaining - proj_header_cost,
+                            formatter=lambda n: format_citation_line(n, compact=True),
+                        )
+                        if packed_proj:
+                            proj_lines = [format_citation_line(m, compact=True) for m in packed_proj]
+                            sections.append("## Project context\n" + "\n".join(proj_lines))
+                            used_ids.update(m.id for m in packed_proj)
+                            abstained = False
+
+        if sync_section:
+            sections.append(sync_section)
 
         captured = {"stored": [], "duplicates": 0, "skipped_sensitive": 0}
         if capture and not is_boot:
@@ -1056,15 +1169,28 @@ class LetheMemory:
             context_text = "\n\n".join(sections)
         else:
             context_text = "No stored memory is relevant to this message."
+
+        # Guarantee the delivered memory slice fits within budget
+        if count_tokens(context_text) > budget:
+            context_text = truncate_to_tokens(context_text, budget)
+
         if captured["stored"]:
-            context_text += "\n\n## Saved from this message\n" + "\n".join(
+            saved_block = "\n\n## Saved from this message\n" + "\n".join(
                 f"- #{c['id']} [{c['category']}] {c['content']}" for c in captured["stored"]
             )
+            if count_tokens(context_text + saved_block) <= budget:
+                context_text += saved_block
+            else:
+                avail_for_saved = max(25, min(120, budget // 4))
+                trimmed_ctx = truncate_to_tokens(context_text, max(40, budget - avail_for_saved))
+                context_text = truncate_to_tokens(trimmed_ctx + saved_block, budget)
 
         return {
             "context_text": context_text,
             "tokens_used": count_tokens(context_text),
-            "is_abstention": abstained and not any(s.startswith("## Who") for s in sections),
+            "is_abstention": abstained and not any(
+                s.startswith(("## Who", "## Relevant", "## Project", "## Memory")) for s in sections
+            ),
             "captured": captured["stored"],
             "duplicates_skipped": captured["duplicates"],
             "sensitive_skipped": captured["skipped_sensitive"],

@@ -14,7 +14,8 @@ from lethe.core.engine import LetheMemory
 def test_schema_v4_migration_and_branch_defaults(tmp_path):
     db_path = tmp_path / "v4.db"
     db = DatabaseManager(db_path)
-    assert db.get_schema_version() == 4
+    assert db.get_schema_version() == db.SCHEMA_VERSION
+    assert db.get_schema_version() >= 4
     assert db.get_active_branch() == "main"
     branches = db.list_branches()
     assert [b["name"] for b in branches] == ["main"]

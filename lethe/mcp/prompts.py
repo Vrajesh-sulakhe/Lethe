@@ -13,6 +13,9 @@ LETHE_MCP_INSTRUCTIONS = (
     "- It automatically saves durable facts the user states. Never ask 'should I save this?' and never wait "
     "for the user to type a command.\n"
     "- If the user types just 'lethe', pass it through: Lethe returns their full memory.\n"
+    "- Pass the actual client workspace_root (absolute project directory) when available; never use the Lethe server installation directory as the project. "
+    "Use lethe_projects to discover exact workspace identifiers when a project name is ambiguous.\n"
+    "- A call instruction is best-effort; automatic enforcement requires a client hook or event integration.\n"
     "Additional tools (`lethe_context`, `lethe_store`, `lethe_recall`, `lethe_forget`, `lethe_branch`, "
     "`lethe_commit`, `lethe_rollback`) remain available for explicit/advanced control."
 )

@@ -188,6 +188,91 @@
 
     </div>
 
+    <!-- Interactive Knowledge & Leaf-Node Graph View -->
+    <section class="bg-surface-900 border border-slate-800 rounded-xl p-6 space-y-4 shadow-xl">
+      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div>
+          <div class="flex items-center gap-2">
+            <h3 class="font-bold text-white text-base flex items-center gap-2">
+              <span>🕸️</span> Memory Graph & Leaf Nodes
+            </h3>
+            <span id="graph-summary-badge" class="text-[11px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">0 nodes · 0 leaves</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-1">
+            Interactive node-and-leaf hierarchy across workspaces, categories, memory nodes, and derived lineage leaves. Drag to pan, scroll to zoom, click any node to inspect.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <input
+            id="graph-search-input"
+            type="text"
+            placeholder="Filter nodes..."
+            oninput="onGraphSearch(this.value)"
+            class="bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 text-xs font-mono w-44 focus:outline-none focus:border-brand-500"
+          />
+          <div class="inline-flex rounded-lg border border-slate-700 bg-slate-950 p-0.5">
+            <button id="graph-mode-tree" onclick="setGraphMode('tree')" class="px-2.5 py-1 rounded-md bg-brand-600 text-black font-semibold transition">Nodes & Leaves</button>
+            <button id="graph-mode-lineage" onclick="setGraphMode('lineage')" class="px-2.5 py-1 rounded-md text-slate-300 hover:text-white transition">Lineage Only</button>
+          </div>
+          <div class="inline-flex items-center rounded-lg border border-slate-700 bg-slate-950">
+            <button onclick="zoomGraph(0.85)" class="px-2.5 py-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-l-lg" title="Zoom out">−</button>
+            <span id="graph-zoom-label" class="px-2 py-1.5 font-mono text-[11px] text-slate-400 border-x border-slate-800">100%</span>
+            <button onclick="zoomGraph(1.18)" class="px-2.5 py-1.5 text-slate-300 hover:text-white hover:bg-slate-800" title="Zoom in">+</button>
+            <button onclick="fitGraphView()" class="px-2.5 py-1.5 text-slate-300 hover:text-white hover:bg-slate-800 border-l border-slate-800 rounded-r-lg" title="Fit to view">Fit</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div class="flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-400">
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span>Active</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-amber-400"></span>Conflict</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-blue-400"></span>Historical</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-rose-400"></span>Quarantined</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-purple-400"></span>Purged</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full border-2 border-emerald-400 bg-slate-950"></span>Leaf Node (0 children)</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-slate-500"></span>Hub / Branch (click to collapse)</span>
+      </div>
+
+      <!-- Graph Canvas + Node Inspector -->
+      <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+        <div
+          id="graph-viewport"
+          class="lg:col-span-3 relative h-[500px] bg-slate-950 border border-slate-800 rounded-xl overflow-hidden select-none cursor-grab active:cursor-grabbing"
+          style="background-image: radial-gradient(rgba(148,163,184,0.14) 1px, transparent 1px); background-size: 20px 20px;"
+        >
+          <svg id="memory-graph-svg" class="w-full h-full">
+            <defs>
+              <marker id="arrow-lineage" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#a855f7"></path>
+              </marker>
+            </defs>
+            <g id="graph-transform-layer"></g>
+          </svg>
+          <div id="graph-empty-state" class="hidden absolute inset-0 flex items-center justify-center text-xs font-mono text-slate-500 pointer-events-none">
+            No graph nodes match the current filter.
+          </div>
+        </div>
+
+        <!-- Selected Node & Leaf Inspector -->
+        <aside id="graph-inspector" class="lg:col-span-1 bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between h-[500px] overflow-y-auto">
+          <div class="space-y-3 text-xs">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+              <span class="font-mono uppercase text-[10px] tracking-wider text-slate-400">Node Inspector</span>
+              <span id="inspector-kind-badge" class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px]">SELECT A NODE</span>
+            </div>
+            <div id="inspector-body" class="text-slate-400 space-y-2.5">
+              <p>Click any hub, memory node, or leaf node in the graph to inspect its metadata, full content, parent provenance, and child leaf nodes.</p>
+            </div>
+          </div>
+          <div class="pt-3 border-t border-slate-800 text-[10px] font-mono text-slate-500">
+            Tip: Click hub/branch nodes to expand or collapse their leaf subtrees.
+          </div>
+        </aside>
+      </div>
+    </section>
+
     <!-- Live Memory Knowledge Table -->
     <section class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl space-y-4 p-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -237,6 +322,17 @@
     let currentFilter = 'all';
     let currentWorkspace = '';
     let eventSource = null;
+
+    // Graph View State
+    let graphMode = 'tree'; // 'tree' | 'lineage'
+    let graphSearch = '';
+    let collapsedGraphNodes = new Set();
+    let selectedGraphNodeId = null;
+    let lastGraphSignature = '';
+    let graphTransform = { x: 40, y: 30, scale: 1 };
+    let graphBounds = { width: 800, height: 480 };
+    let graphHasInitialFit = false;
+    let currentGraphNodeMap = new Map();
 
     function escapeHtml(unsafe) {
       return String(unsafe ?? '')
@@ -303,6 +399,7 @@
         allEdges = linData.edges || [];
         renderSecurityMonitor();
         renderLineageDag();
+        renderGraphView();
         renderTable();
       } catch (err) {
         console.error('Error fetching dashboard data:', err);
@@ -312,7 +409,7 @@
     function onWorkspaceChange(ws) {
       currentWorkspace = ws || '';
       connectSse();
-      fetchData();
+    fetchData();
     }
 
     function connectSse() {
@@ -449,6 +546,535 @@
         `;
       }).join('');
     }
+
+    const STATUS_COLORS = {
+      active: { stroke: '#4ade80', fill: '#052e16', dot: '#4ade80', text: '#dcfce7' },
+      conflict: { stroke: '#fbbf24', fill: '#451a03', dot: '#fbbf24', text: '#fef3c7' },
+      historical: { stroke: '#60a5fa', fill: '#172554', dot: '#60a5fa', text: '#dbeafe' },
+      quarantined: { stroke: '#fb7185', fill: '#4c0519', dot: '#fb7185', text: '#ffe4e6' },
+      tombstoned: { stroke: '#c084fc', fill: '#3b0764', dot: '#c084fc', text: '#f3e8ff' },
+      hub: { stroke: '#38bdf8', fill: '#0f172a', dot: '#38bdf8', text: '#e2e8f0' },
+      root: { stroke: '#22c55e', fill: '#064e3b', dot: '#4ade80', text: '#ecfdf5' },
+    };
+
+    function setGraphMode(mode) {
+      graphMode = mode;
+      const treeBtn = document.getElementById('graph-mode-tree');
+      const linBtn = document.getElementById('graph-mode-lineage');
+      if (treeBtn && linBtn) {
+        treeBtn.className = mode === 'tree'
+          ? 'px-2.5 py-1 rounded-md bg-brand-600 text-black font-semibold transition'
+          : 'px-2.5 py-1 rounded-md text-slate-300 hover:text-white transition';
+        linBtn.className = mode === 'lineage'
+          ? 'px-2.5 py-1 rounded-md bg-brand-600 text-black font-semibold transition'
+          : 'px-2.5 py-1 rounded-md text-slate-300 hover:text-white transition';
+      }
+      lastGraphSignature = '';
+      graphHasInitialFit = false;
+      renderGraphView();
+    }
+
+    function onGraphSearch(val) {
+      graphSearch = (val || '').trim().toLowerCase();
+      lastGraphSignature = '';
+      renderGraphView();
+    }
+
+    function applyGraphTransform() {
+      const layer = document.getElementById('graph-transform-layer');
+      if (layer) {
+        layer.setAttribute('transform', `translate(${graphTransform.x}, ${graphTransform.y}) scale(${graphTransform.scale})`);
+      }
+      const label = document.getElementById('graph-zoom-label');
+      if (label) {
+        label.innerText = `${Math.round(graphTransform.scale * 100)}%`;
+      }
+    }
+
+    function zoomGraph(factor, anchorX, anchorY) {
+      const viewport = document.getElementById('graph-viewport');
+      const rect = viewport ? viewport.getBoundingClientRect() : { width: 800, height: 500 };
+      const cx = anchorX !== undefined ? anchorX : rect.width / 2;
+      const cy = anchorY !== undefined ? anchorY : rect.height / 2;
+      const nextScale = Math.min(2.4, Math.max(0.25, graphTransform.scale * factor));
+      const ratio = nextScale / graphTransform.scale;
+      graphTransform.x = cx - (cx - graphTransform.x) * ratio;
+      graphTransform.y = cy - (cy - graphTransform.y) * ratio;
+      graphTransform.scale = nextScale;
+      applyGraphTransform();
+    }
+
+    function fitGraphView() {
+      const viewport = document.getElementById('graph-viewport');
+      if (!viewport) return;
+      const rect = viewport.getBoundingClientRect();
+      const vw = Math.max(300, rect.width || 800);
+      const vh = Math.max(300, rect.height || 500);
+      const pad = 32;
+      const scale = Math.min(1.15, Math.max(0.3, Math.min((vw - pad * 2) / Math.max(1, graphBounds.width), (vh - pad * 2) / Math.max(1, graphBounds.height))));
+      graphTransform.scale = scale;
+      graphTransform.x = Math.max(16, (vw - graphBounds.width * scale) / 2);
+      graphTransform.y = Math.max(16, (vh - graphBounds.height * scale) / 2);
+      applyGraphTransform();
+    }
+
+    function buildGraphModel() {
+      const memById = new Map();
+      for (const m of allMemories) {
+        memById.set(m.id, m);
+      }
+
+      const childrenByParent = new Map();
+      const parentsByChild = new Map();
+      const addLink = (pid, cid) => {
+        if (!pid || !cid || pid === cid) return;
+        if (!childrenByParent.has(pid)) childrenByParent.set(pid, new Set());
+        childrenByParent.get(pid).add(cid);
+        if (!parentsByChild.has(cid)) parentsByChild.set(cid, new Set());
+        parentsByChild.get(cid).add(pid);
+      };
+
+      for (const e of allEdges) {
+        addLink(e.parent_id, e.child_id);
+      }
+      for (const m of allMemories) {
+        if (Array.isArray(m.parent_ids)) {
+          for (const pid of m.parent_ids) {
+            if (memById.has(pid)) addLink(pid, m.id);
+          }
+        }
+      }
+
+      const nodes = new Map();
+      const addNode = (id, data) => {
+        if (!nodes.has(id)) {
+          nodes.set(id, { id, children: [], parents: [], ...data });
+        }
+        return nodes.get(id);
+      };
+
+      const matchesSearch = (m) => {
+        if (!graphSearch) return true;
+        const hay = `${m.id} ${m.content} ${m.category} ${m.workspace_id || ''} ${m.status} ${m.tier}`.toLowerCase();
+        return hay.includes(graphSearch);
+      };
+
+      const matchingIds = new Set();
+      if (graphSearch) {
+        for (const m of allMemories) {
+          if (matchesSearch(m)) {
+            matchingIds.add(m.id);
+            // Include ancestors & direct children so leaf context stays intact
+            const queue = [m.id];
+            const seen = new Set([m.id]);
+            while (queue.length > 0) {
+              const cur = queue.shift();
+              for (const pid of (parentsByChild.get(cur) || [])) {
+                if (!seen.has(pid)) {
+                  seen.add(pid);
+                  matchingIds.add(pid);
+                  queue.push(pid);
+                }
+              }
+            }
+            for (const cid of (childrenByParent.get(m.id) || [])) {
+              matchingIds.add(cid);
+            }
+          }
+        }
+      }
+
+      const visibleMemIds = new Set(
+        allMemories
+          .filter(m => !graphSearch || matchingIds.has(m.id))
+          .map(m => m.id)
+      );
+
+      const attachMemorySubtree = (memId, parentGraphId, visited) => {
+        if (visited.has(memId)) return;
+        visited.add(memId);
+        const m = memById.get(memId);
+        const edgeMeta = allEdges.find(e => e.parent_id === memId || e.child_id === memId);
+        const labelText = m
+          ? (m.content.length > 34 ? m.content.slice(0, 34) + '…' : m.content)
+          : (edgeMeta && edgeMeta.parent_id === memId ? (edgeMeta.parent_preview || memId.slice(0, 8)) : (edgeMeta && edgeMeta.child_preview) || memId.slice(0, 8));
+        const status = m ? m.status.toLowerCase() : (edgeMeta && edgeMeta.parent_id === memId ? edgeMeta.parent_status : (edgeMeta ? edgeMeta.child_status : 'active'));
+
+        const gNode = addNode(`mem:${memId}`, {
+          kind: 'memory',
+          memId,
+          label: labelText,
+          sublabel: m ? `${m.category} · ${m.tier}` : 'lineage node',
+          status,
+          memory: m || null,
+          isLeaf: false,
+        });
+        const pNode = nodes.get(parentGraphId);
+        if (pNode && !pNode.children.includes(gNode.id)) {
+          pNode.children.push(gNode.id);
+          gNode.parents.push(pNode.id);
+        }
+
+        const childIds = Array.from(childrenByParent.get(memId) || []).filter(cid =>
+          graphMode === 'lineage' ? true : visibleMemIds.has(cid) || memById.has(cid)
+        );
+        for (const cid of childIds) {
+          attachMemorySubtree(cid, gNode.id, new Set(visited));
+        }
+      };
+
+      const rootTitle = currentWorkspace ? `Workspace: ${currentWorkspace}` : 'Lethe Memory OS';
+      const rootNode = addNode('root:lethe', {
+        kind: 'root',
+        label: rootTitle,
+        sublabel: graphMode === 'lineage' ? 'Lineage DAG Roots' : 'Knowledge & Leaf Tree',
+        status: 'root',
+        memory: null,
+        isLeaf: false,
+      });
+
+      if (graphMode === 'lineage') {
+        const involvedIds = new Set();
+        for (const e of allEdges) {
+          if (graphSearch) {
+            const pMem = memById.get(e.parent_id);
+            const cMem = memById.get(e.child_id);
+            const matchP = pMem ? matchesSearch(pMem) : (e.parent_preview || '').toLowerCase().includes(graphSearch);
+            const matchC = cMem ? matchesSearch(cMem) : (e.child_preview || '').toLowerCase().includes(graphSearch);
+            if (!matchP && !matchC) continue;
+          }
+          involvedIds.add(e.parent_id);
+          involvedIds.add(e.child_id);
+        }
+        const roots = Array.from(involvedIds).filter(id => {
+          const ps = parentsByChild.get(id);
+          return !ps || Array.from(ps).every(p => !involvedIds.has(p));
+        });
+        for (const rid of roots) {
+          attachMemorySubtree(rid, rootNode.id, new Set());
+        }
+      } else {
+        // Group top-level visible memories (those without visible parent memories) by Workspace -> Category
+        const visibleMems = allMemories.filter(m => visibleMemIds.has(m.id));
+        const topLevelMems = visibleMems.filter(m => {
+          const ps = parentsByChild.get(m.id);
+          return !ps || Array.from(ps).every(pid => !visibleMemIds.has(pid));
+        });
+
+        const byWorkspace = new Map();
+        for (const m of topLevelMems) {
+          const ws = m.workspace_id || 'global';
+          if (!byWorkspace.has(ws)) byWorkspace.set(ws, new Map());
+          const catMap = byWorkspace.get(ws);
+          const cat = m.category || 'general';
+          if (!catMap.has(cat)) catMap.set(cat, []);
+          catMap.get(cat).push(m);
+        }
+
+        for (const [ws, catMap] of Array.from(byWorkspace.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+          const wsNode = addNode(`ws:${ws}`, {
+            kind: 'workspace',
+            label: ws,
+            sublabel: `${catMap.size} categories`,
+            status: 'hub',
+            memory: null,
+            isLeaf: false,
+          });
+          rootNode.children.push(wsNode.id);
+          wsNode.parents.push(rootNode.id);
+
+          for (const [cat, mems] of Array.from(catMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+            const catNode = addNode(`cat:${ws}:${cat}`, {
+              kind: 'category',
+              label: cat,
+              sublabel: `${mems.length} nodes`,
+              status: 'hub',
+              memory: null,
+              isLeaf: false,
+            });
+            wsNode.children.push(catNode.id);
+            catNode.parents.push(wsNode.id);
+
+            for (const m of mems) {
+              attachMemorySubtree(m.id, catNode.id, new Set());
+            }
+          }
+        }
+      }
+
+      // Mark leaf nodes (nodes with 0 outgoing children)
+      let leafCount = 0;
+      for (const n of nodes.values()) {
+        if (n.kind === 'memory' && n.children.length === 0) {
+          n.isLeaf = true;
+          leafCount += 1;
+        }
+      }
+
+      return { nodes, rootId: rootNode.id, leafCount };
+    }
+
+    function layoutGraphTree(nodes, rootId) {
+      const colWidth = 270;
+      const rowHeight = 56;
+      const nodeW = 216;
+      const nodeH = 40;
+      const positioned = new Map();
+      const extraEdges = [];
+      const placed = new Set();
+
+      function computeSubtreeHeight(nodeId, depth) {
+        const node = nodes.get(nodeId);
+        if (!node) return 0;
+        if (collapsedGraphNodes.has(nodeId) || node.children.length === 0) {
+          return 1;
+        }
+        let sum = 0;
+        for (const cid of node.children) {
+          if (!placed.has(cid)) {
+            sum += computeSubtreeHeight(cid, depth + 1);
+          }
+        }
+        return Math.max(1, sum);
+      }
+
+      let maxX = 0;
+      let maxY = 0;
+
+      function assignCoords(nodeId, depth, yStart) {
+        const node = nodes.get(nodeId);
+        if (!node) return yStart;
+        placed.add(nodeId);
+
+        const visibleChildren = collapsedGraphNodes.has(nodeId)
+          ? []
+          : node.children.filter(cid => !placed.has(cid));
+
+        if (visibleChildren.length === 0) {
+          const x = depth * colWidth + 24;
+          const y = yStart * rowHeight + 24;
+          positioned.set(nodeId, { ...node, x, y, w: nodeW, h: nodeH, depth });
+          maxX = Math.max(maxX, x + nodeW + 40);
+          maxY = Math.max(maxY, y + nodeH + 40);
+          return yStart + 1;
+        }
+
+        let curY = yStart;
+        const childCenters = [];
+        for (const cid of visibleChildren) {
+          const prevY = curY;
+          curY = assignCoords(cid, depth + 1, curY);
+          const cp = positioned.get(cid);
+          if (cp) childCenters.push(cp.y + cp.h / 2);
+        }
+        const firstC = childCenters[0];
+        const lastC = childCenters[childCenters.length - 1];
+        const centerY = (firstC + lastC) / 2;
+        const x = depth * colWidth + 24;
+        const y = centerY - nodeH / 2;
+        positioned.set(nodeId, { ...node, x, y, w: nodeW, h: nodeH, depth });
+        maxX = Math.max(maxX, x + nodeW + 40);
+        maxY = Math.max(maxY, y + nodeH + 40);
+        return curY;
+      }
+
+      assignCoords(rootId, 0, 0);
+
+      // Collect all visible edges (tree + cross-DAG edges)
+      const edges = [];
+      for (const [id, pNode] of positioned.entries()) {
+        const orig = nodes.get(id);
+        if (!orig || collapsedGraphNodes.has(id)) continue;
+        for (const cid of orig.children) {
+          const cNode = positioned.get(cid);
+          if (cNode) {
+            edges.push({ from: pNode, to: cNode, isLineage: pNode.kind === 'memory' && cNode.kind === 'memory' });
+          }
+        }
+      }
+
+      return { positioned, edges, width: Math.max(400, maxX), height: Math.max(300, maxY) };
+    }
+
+    function selectGraphNode(nodeId, toggleCollapse) {
+      const node = currentGraphNodeMap.get(nodeId);
+      if (!node) return;
+      if (toggleCollapse && node.children.length > 0) {
+        if (collapsedGraphNodes.has(nodeId)) {
+          collapsedGraphNodes.delete(nodeId);
+        } else {
+          collapsedGraphNodes.add(nodeId);
+        }
+        lastGraphSignature = '';
+      }
+      selectedGraphNodeId = nodeId;
+      renderGraphInspector(node);
+      renderGraphView();
+    }
+
+    function renderGraphInspector(node) {
+      const badge = document.getElementById('inspector-kind-badge');
+      const body = document.getElementById('inspector-body');
+      if (!badge || !body || !node) return;
+
+      const kindLabel = node.isLeaf ? 'LEAF NODE' : (node.kind === 'memory' ? 'PARENT NODE' : node.kind.toUpperCase());
+      badge.innerText = kindLabel;
+
+      const childLinks = node.children.map(cid => {
+        const cn = currentGraphNodeMap.get(cid);
+        if (!cn) return '';
+        const tag = cn.isLeaf ? '🍃' : '◆';
+        return `<button onclick="selectGraphNode('${escapeHtml(cid)}', false)" class="w-full text-left px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] font-mono text-slate-200 truncate">${tag} ${escapeHtml(cn.label)}</button>`;
+      }).join('');
+
+      const parentLinks = node.parents.map(pid => {
+        const pn = currentGraphNodeMap.get(pid);
+        if (!pn) return '';
+        return `<button onclick="selectGraphNode('${escapeHtml(pid)}', false)" class="w-full text-left px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] font-mono text-slate-300 truncate">↑ ${escapeHtml(pn.label)}</button>`;
+      }).join('');
+
+      if (node.memory) {
+        const m = node.memory;
+        body.innerHTML = `
+          <div class="space-y-1">
+            <div class="text-[10px] font-mono text-slate-500">ID: ${escapeHtml(m.id)}</div>
+            <div class="flex flex-wrap gap-1.5 text-[10px] font-mono">
+              <span class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200">${escapeHtml(m.status.toUpperCase())}</span>
+              <span class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">${escapeHtml(m.tier)}</span>
+              <span class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">trust ${Number(m.trust_level).toFixed(1)}</span>
+            </div>
+          </div>
+          <div class="bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 text-xs leading-relaxed break-words max-h-40 overflow-y-auto">${escapeHtml(m.content)}</div>
+          <div class="text-[11px] font-mono text-slate-400">
+            <div>Workspace: <span class="text-slate-200">${escapeHtml(m.workspace_id || 'global')}</span></div>
+            <div>Category: <span class="text-slate-200">${escapeHtml(m.category)}</span></div>
+            <div>Origin: <span class="text-slate-200">${escapeHtml(m.source_origin)}</span></div>
+          </div>
+          ${parentLinks ? `<div class="space-y-1"><div class="text-[10px] font-mono uppercase text-slate-500">Parents (${node.parents.length})</div>${parentLinks}</div>` : ''}
+          ${childLinks ? `<div class="space-y-1"><div class="text-[10px] font-mono uppercase text-slate-500">Child / Leaf Nodes (${node.children.length})</div>${childLinks}</div>` : '<div class="text-[11px] font-mono text-emerald-400/80">🍃 Terminal leaf node (0 children)</div>'}
+        `;
+      } else {
+        body.innerHTML = `
+          <div class="text-sm font-semibold text-white">${escapeHtml(node.label)}</div>
+          <div class="text-[11px] font-mono text-slate-400">${escapeHtml(node.sublabel || '')}</div>
+          ${parentLinks ? `<div class="space-y-1"><div class="text-[10px] font-mono uppercase text-slate-500">Parent</div>${parentLinks}</div>` : ''}
+          ${childLinks ? `<div class="space-y-1"><div class="text-[10px] font-mono uppercase text-slate-500">Connected Nodes (${node.children.length})</div><div class="space-y-1 max-h-60 overflow-y-auto">${childLinks}</div></div>` : ''}
+        `;
+      }
+    }
+
+    function renderGraphView() {
+      const sig = JSON.stringify({
+        mode: graphMode,
+        ws: currentWorkspace,
+        q: graphSearch,
+        collapsed: Array.from(collapsedGraphNodes).sort(),
+        selected: selectedGraphNodeId,
+        mCount: allMemories.length,
+        mIds: allMemories.map(m => `${m.id}:${m.status}`).slice(0, 120),
+        eCount: allEdges.length,
+      });
+      if (sig === lastGraphSignature) return;
+      lastGraphSignature = sig;
+
+      const { nodes, rootId, leafCount } = buildGraphModel();
+      currentGraphNodeMap = nodes;
+
+      const totalNodes = Math.max(0, nodes.size - 1);
+      const badge = document.getElementById('graph-summary-badge');
+      if (badge) {
+        badge.innerText = `${totalNodes} nodes · ${leafCount} leaves`;
+      }
+
+      const emptyEl = document.getElementById('graph-empty-state');
+      const layer = document.getElementById('graph-transform-layer');
+      if (!layer) return;
+
+      if (nodes.size <= 1) {
+        layer.innerHTML = '';
+        if (emptyEl) emptyEl.classList.remove('hidden');
+        return;
+      }
+      if (emptyEl) emptyEl.classList.add('hidden');
+
+      const { positioned, edges, width, height } = layoutGraphTree(nodes, rootId);
+      graphBounds = { width, height };
+
+      const edgeSvg = edges.map(({ from, to, isLineage }) => {
+        const x1 = from.x + from.w;
+        const y1 = from.y + from.h / 2;
+        const x2 = to.x;
+        const y2 = to.y + to.h / 2;
+        const dx = Math.max(36, (x2 - x1) * 0.5);
+        const isHighlighted = selectedGraphNodeId && (from.id === selectedGraphNodeId || to.id === selectedGraphNodeId);
+        const stroke = isHighlighted ? '#4ade80' : (isLineage ? '#a855f7' : '#334155');
+        const strokeWidth = isHighlighted ? 2.2 : (isLineage ? 1.8 : 1.3);
+        const marker = isLineage ? 'marker-end="url(#arrow-lineage)"' : '';
+        return `<path d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" ${marker} />`;
+      }).join('');
+
+      const nodeSvg = Array.from(positioned.values()).map(n => {
+        const palette = STATUS_COLORS[n.status] || STATUS_COLORS.active;
+        const isSelected = n.id === selectedGraphNodeId;
+        const isCollapsed = collapsedGraphNodes.has(n.id);
+        const rx = n.isLeaf ? 20 : 10;
+        const strokeColor = isSelected ? '#ffffff' : palette.stroke;
+        const strokeWidth = isSelected ? 2.4 : (n.isLeaf ? 1.4 : 1.8);
+        const canCollapse = n.children.length > 0;
+        const countTag = canCollapse ? (isCollapsed ? `+${n.children.length}` : `${n.children.length}`) : '';
+        const icon = n.isLeaf ? '🍃 ' : '';
+
+        return `
+          <g transform="translate(${n.x}, ${n.y})" class="cursor-pointer" onclick="event.stopPropagation(); selectGraphNode('${escapeHtml(n.id)}', ${canCollapse && n.kind !== 'memory'})" ondblclick="event.stopPropagation(); selectGraphNode('${escapeHtml(n.id)}', true)">
+            <rect width="${n.w}" height="${n.h}" rx="${rx}" fill="${palette.fill}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
+            <circle cx="14" cy="${n.h / 2}" r="4" fill="${palette.dot}" />
+            <text x="25" y="17" fill="${palette.text}" font-size="11" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="600">${escapeHtml(icon + (n.label.length > 22 ? n.label.slice(0, 22) + '…' : n.label))}</text>
+            <text x="25" y="31" fill="#94a3b8" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml((n.sublabel || '').slice(0, 26))}</text>
+            ${countTag ? `<rect x="${n.w - 30}" y="11" width="22" height="18" rx="6" fill="#020617" stroke="#334155" stroke-width="1" /><text x="${n.w - 19}" y="23" text-anchor="middle" fill="#cbd5e1" font-size="9.5" font-family="ui-monospace, monospace">${escapeHtml(countTag)}</text>` : ''}
+          </g>
+        `;
+      }).join('');
+
+      layer.innerHTML = `${edgeSvg}${nodeSvg}`;
+
+      if (!graphHasInitialFit) {
+        graphHasInitialFit = true;
+        fitGraphView();
+      } else {
+        applyGraphTransform();
+      }
+
+      if (selectedGraphNodeId && nodes.has(selectedGraphNodeId)) {
+        renderGraphInspector(nodes.get(selectedGraphNodeId));
+      }
+    }
+
+    (function initGraphPanZoom() {
+      const viewport = document.getElementById('graph-viewport');
+      if (!viewport) return;
+      let dragging = false;
+      let startX = 0;
+      let startY = 0;
+
+      viewport.addEventListener('mousedown', (e) => {
+        dragging = true;
+        startX = e.clientX - graphTransform.x;
+        startY = e.clientY - graphTransform.y;
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        graphTransform.x = e.clientX - startX;
+        graphTransform.y = e.clientY - startY;
+        applyGraphTransform();
+      });
+      window.addEventListener('mouseup', () => { dragging = false; });
+      viewport.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = viewport.getBoundingClientRect();
+        const factor = e.deltaY < 0 ? 1.1 : 0.9;
+        zoomGraph(factor, e.clientX - rect.left, e.clientY - rect.top);
+      }, { passive: false });
+    })();
 
     fetchData();
     connectSse();

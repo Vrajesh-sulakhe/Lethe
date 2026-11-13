@@ -3,7 +3,7 @@ import hashlib
 import os
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional, Tuple
 from lethe.models import CodeAnchor
 
@@ -91,13 +91,23 @@ def check_code_drift(
     Returns:
         (is_drifted: bool, warning_message: Optional[str])
     """
+    if os.name != "nt" and PureWindowsPath(anchor.file_path).is_absolute():
+        return False, "Anchor is on another platform; local file availability is unverified."
     raw_path = Path(anchor.file_path)
+    root = anchor.workspace_root or workspace_dir
     if raw_path.is_absolute():
         resolved_file = raw_path
-    elif workspace_dir:
-        resolved_file = (Path(workspace_dir) / raw_path).resolve()
+    elif root and Path(root).is_absolute():
+        if os.name != "nt" and PureWindowsPath(str(root)).is_absolute():
+            return False, "Anchor is on another platform; local file availability is unverified."
+        root_path = Path(root)
+        if not root_path.is_dir():
+            return False, "Project root is unavailable; local file availability is unverified."
+        resolved_file = (root_path / raw_path).resolve()
+        if not resolved_file.is_relative_to(root_path.resolve()):
+            return False, "Anchor escapes the project root; local file availability is unverified."
     else:
-        resolved_file = raw_path.resolve()
+        return False, "Project root is unknown; local file availability is unverified."
 
     # 1. Existence check
     if not resolved_file.is_file():

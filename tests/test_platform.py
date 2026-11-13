@@ -233,6 +233,9 @@ def test_dashboard_server_endpoints():
                 html = resp.read().decode("utf-8")
                 assert "LETHE" in html
                 assert "Knapsack Memory Governor" in html
+                assert "memory-graph-svg" in html
+                assert "graph-inspector" in html
+                assert "renderGraphView" in html
 
             # 2. Test /api/stats endpoint
             req = urllib.request.Request(f"{base_url}/api/stats")
@@ -743,33 +746,33 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
     targets = get_known_tool_targets()
     assert "claude-desktop" in targets
     assert any("claude_desktop_config.json" in str(p) for p in targets["claude-desktop"])
-    assert any("claude_desktop_config.json" in str(p) for p in targets["claude"])
-    assert "gemini-desktop" in targets
-    assert "gemini" in targets
-    assert any("gemini_desktop_config.json" in str(p) for p in targets["gemini-desktop"])
+    assert not any("claude_desktop_config.json" in str(p) for p in targets["claude"])
+    assert targets["gemini-desktop"] == []
+    assert targets["openai-desktop"] == []
+    assert targets["chatgpt"] == []
+    assert any("settings.json" in str(p) for p in targets["gemini-cli"])
     assert any("settings.json" in str(p) for p in targets["gemini"])
-    assert "openai-desktop" in targets
-    assert "chatgpt" in targets
-    assert "openai" in targets
-    assert any("ChatGPT" in str(p) and p.name == "mcp.json" for p in targets["openai-desktop"])
-    assert any("config.toml" in str(p) for p in targets["openai-desktop"])
+    assert any("config.toml" in str(p) for p in targets["codex"])
+    assert any("config.toml" in str(p) for p in targets["codex-desktop"])
 
-    # Credentials payload includes desktop paths and CLI commands
+    # Credentials payload includes verified desktop paths, manual flags, and CLI commands
     creds = build_mcp_credentials(db_path="/tmp/lethe.db", procedures_dir="/tmp/procs")
-    assert "claude_desktop" in creds["desktop_config_paths"]
-    assert "gemini_desktop" in creds["desktop_config_paths"]
-    assert "openai_desktop" in creds["desktop_config_paths"]
+    assert "claude_desktop_config.json" in creds["desktop_config_paths"]["claude_desktop"]
+    assert creds["desktop_config_paths"]["gemini_desktop"] is None
+    assert creds["desktop_config_paths"]["openai_desktop"] is None
+    assert set(creds["manual_clients"]) == {"gemini-desktop", "chatgpt"}
     assert "gemini mcp add lethe" in creds["gemini_cli"]
 
-    # Default detect_installed_tools omits duplicate aliases while keeping canonical desktop tools
+    # Default detect_installed_tools omits duplicate aliases while keeping canonical entries
     detected_default = detect_installed_tools()
     assert "claude-desktop" in detected_default
     assert "gemini-desktop" in detected_default
     assert "openai-desktop" in detected_default
+    assert "gemini-cli" in detected_default
     assert "chatgpt" not in detected_default
     assert "gemini" not in detected_default
 
-    # 1. macOS Desktop App Support paths (Claude Desktop, Gemini Desktop, OpenAI/ChatGPT Desktop JSON & TOML)
+    # 1. macOS Desktop App Support paths (Claude Desktop configurable; Gemini/OpenAI Desktop manual-only)
     monkeypatch.setattr(setup_mod.sys, "platform", "darwin")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_home = Path(tmpdir)
@@ -794,53 +797,26 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
         assert "lethe" in cd_data["mcpServers"]
         assert "other" in cd_data["mcpServers"]
 
-        # Gemini Desktop (macOS Application Support JSON)
-        gem_app_path = tmp_home / "Library" / "Application Support" / "Gemini" / "gemini_desktop_config.json"
-        gem_app_path.parent.mkdir(parents=True, exist_ok=True)
-        gem_app_path.write_text('{"mcpServers": {"g_tool": {"command": "python"}}}', encoding="utf-8")
-
-        res_gem_app = setup_all_tools(
-            tools=["gemini-desktop"],
+        # Gemini Desktop and OpenAI / ChatGPT Desktop report unsupported (no fictional config writes)
+        res_manual = setup_all_tools(
+            tools=["gemini-desktop", "openai-desktop"],
             db_path=str(ws / "lethe.db"),
             workspace_dir=ws,
             home_dir=tmp_home,
         )
-        assert len(res_gem_app) == 1
-        assert Path(res_gem_app[0]["path"]) == gem_app_path.resolve()
-        assert _is_lethe_configured(gem_app_path) is True
-        gem_app_data = json.loads(gem_app_path.read_text(encoding="utf-8"))
-        assert "lethe" in gem_app_data["mcpServers"]
-        assert "g_tool" in gem_app_data["mcpServers"]
+        assert [r["status"] for r in res_manual] == ["unsupported", "unsupported"]
 
-        # OpenAI / ChatGPT Desktop JSON config (macOS Application Support/ChatGPT/mcp.json)
-        oai_json_path = tmp_home / "Library" / "Application Support" / "ChatGPT" / "mcp.json"
-        oai_json_path.parent.mkdir(parents=True, exist_ok=True)
-        oai_json_path.write_text('{"mcpServers": {"existing_oai": {"command": "uvx"}}}', encoding="utf-8")
-
-        res_oai_json = setup_all_tools(
-            tools=["openai-desktop"],
-            db_path=str(ws / "lethe.db"),
-            workspace_dir=ws,
-            home_dir=tmp_home,
-        )
-        assert len(res_oai_json) == 1
-        assert Path(res_oai_json[0]["path"]) == oai_json_path.resolve()
-        assert _is_lethe_configured(oai_json_path) is True
-        oai_data = json.loads(oai_json_path.read_text(encoding="utf-8"))
-        assert "lethe" in oai_data["mcpServers"]
-        assert "existing_oai" in oai_data["mcpServers"]
-
-        # Full `setup_all_tools(tools=None)` deduplicates identical paths
+        # Full `setup_all_tools(tools=None)` deduplicates identical written paths
         all_outcomes = setup_all_tools(
             tools=None,
             db_path=str(ws / "lethe.db"),
             workspace_dir=ws,
             home_dir=tmp_home,
         )
-        written_paths = [o["path"] for o in all_outcomes]
+        written_paths = [o["path"] for o in all_outcomes if o.get("path") is not None]
         assert len(written_paths) == len(set(written_paths))
 
-    # 2. Fallback resolution when ChatGPT/Gemini use ~/.codex/config.toml and ~/.gemini/settings.json
+    # 2. Gemini CLI (~/.gemini/settings.json) and Codex (~/.codex/config.toml); ChatGPT remains unsupported
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_home = Path(tmpdir)
         ws = tmp_home / "project"
@@ -863,16 +839,24 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
         gpt_path.parent.mkdir(parents=True, exist_ok=True)
         gpt_path.write_text('model = "o3"\n', encoding="utf-8")
 
-        res_gpt = setup_all_tools(
+        res_codex = setup_all_tools(
+            tools=["codex-desktop"],
+            db_path=str(ws / "lethe.db"),
+            workspace_dir=ws,
+            home_dir=tmp_home,
+        )
+        assert len(res_codex) == 1
+        assert _is_lethe_configured(gpt_path) is True
+        gpt_data = tomllib.loads(gpt_path.read_text(encoding="utf-8"))
+        assert "lethe" in gpt_data["mcp_servers"]
+
+        res_chatgpt = setup_all_tools(
             tools=["chatgpt"],
             db_path=str(ws / "lethe.db"),
             workspace_dir=ws,
             home_dir=tmp_home,
         )
-        assert len(res_gpt) == 1
-        assert _is_lethe_configured(gpt_path) is True
-        gpt_data = tomllib.loads(gpt_path.read_text(encoding="utf-8"))
-        assert "lethe" in gpt_data["mcp_servers"]
+        assert [r["status"] for r in res_chatgpt] == ["unsupported"]
 
     # 3. Windows MSIX & Roaming paths with isolated home_dir
     monkeypatch.setattr(setup_mod.sys, "platform", "win32")
@@ -895,14 +879,6 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
         msix_claude.parent.mkdir(parents=True, exist_ok=True)
         msix_claude.write_text('{"mcpServers": {}}', encoding="utf-8")
 
-        win_gem = win_home / "AppData" / "Roaming" / "Gemini" / "gemini_desktop_config.json"
-        win_gem.parent.mkdir(parents=True, exist_ok=True)
-        win_gem.write_text('{"mcpServers": {}}', encoding="utf-8")
-
-        win_oai = win_home / "AppData" / "Roaming" / "ChatGPT" / "mcp.json"
-        win_oai.parent.mkdir(parents=True, exist_ok=True)
-        win_oai.write_text('{"mcpServers": {}}', encoding="utf-8")
-
         res_win = setup_all_tools(
             tools=["claude-desktop", "gemini-desktop", "openai-desktop"],
             python_path=r"C:\Python312\python.exe",
@@ -911,9 +887,10 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
             home_dir=win_home,
         )
         assert len(res_win) == 3
+        assert res_win[0]["status"] == "configured"
+        assert res_win[1]["status"] == "unsupported"
+        assert res_win[2]["status"] == "unsupported"
         assert _is_lethe_configured(msix_claude) is True
-        assert _is_lethe_configured(win_gem) is True
-        assert _is_lethe_configured(win_oai) is True
 
     # 4. Linux XDG_CONFIG_HOME / ~/.config paths
     monkeypatch.setattr(setup_mod.sys, "platform", "linux")
@@ -923,8 +900,6 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
         ws.mkdir()
 
         lin_cd = lin_home / ".config" / "Claude" / "claude_desktop_config.json"
-        lin_gem = lin_home / ".config" / "Gemini" / "gemini_desktop_config.json"
-        lin_oai = lin_home / ".config" / "ChatGPT" / "mcp.json"
 
         res_lin = setup_all_tools(
             tools=["claude-desktop", "gemini-desktop", "openai-desktop"],
@@ -934,19 +909,20 @@ def test_desktop_tools_detection_and_configuration(monkeypatch):
             home_dir=lin_home,
         )
         assert len(res_lin) == 3
+        assert res_lin[0]["status"] == "configured"
+        assert res_lin[1]["status"] == "unsupported"
+        assert res_lin[2]["status"] == "unsupported"
         assert _is_lethe_configured(lin_cd) is True
-        assert _is_lethe_configured(lin_gem) is True
-        assert _is_lethe_configured(lin_oai) is True
 
-    # 5. CLI `setup --check` lists all desktop targets cleanly
+    # 5. CLI `setup --check` lists all desktop & CLI targets cleanly
     r_check = subprocess.run(
         [sys.executable, "-m", "lethe.cli", "setup", "--check"],
         capture_output=True,
         text=True,
         check=True,
     )
-    for desktop_key in ("claude-desktop", "gemini-desktop", "openai-desktop"):
-        assert desktop_key in r_check.stdout
+    for key in ("claude-desktop", "gemini-desktop", "openai-desktop", "gemini-cli", "codex"):
+        assert key in r_check.stdout
 
 
 

@@ -8,7 +8,8 @@ RULE_END_MARKER = "<!-- LETHE_MEMORY_RULES:END -->"
 def get_desktop_system_prompt() -> str:
     """Returns copy-pasteable custom instructions for Claude, Gemini, and ChatGPT Desktop."""
     return (
-        "You have persistent cross-tool memory via the `lethe` MCP server shared across all my apps and IDEs.\n"
+        "These instructions are best effort, not a native capture guarantee; they apply only when a supported Lethe MCP connection is available.\n"
+        "You have persistent cross-tool memory via the `lethe` MCP server shared across my connected apps and IDEs.\n"
         "- ON EVERY MESSAGE: Silently call the `lethe` tool FIRST with my exact message as `message` (and your app name as `client`, e.g. `claude-desktop`).\n"
         "- In that single call, Lethe serves the relevant slice of memory (who I am, my snacks/preferences, active project decisions, cross-tool updates) AND automatically saves any durable facts I mentioned.\n"
         "- Use the returned memory silently as background truth. NEVER ask 'do you want me to save this?' or wait for commands.\n"
@@ -21,6 +22,7 @@ def get_autonomous_memory_markdown() -> str:
     """Returns the bounded autonomous Lethe protocol block for agent instruction files."""
     return (
         "## Lethe Autonomous Cross-Tool Memory\n\n"
+        "Instruction rules are best effort; native capture requires a separately installed, supported adapter.\n\n"
         "**THE ONE RULE — Call `lethe` FIRST on every user message**:\n"
         "Before replying to ANY user message, call `lethe(message=<user's message verbatim>, client=<your tool name>)`.\n\n"
         "1. **Automatic Slice Serving**: In one call, `lethe` returns only the relevant slice of memory (identity, preferences, snacks/foods, project decisions, active handovers, and cross-tool deltas). Use it silently as background truth; never say 'I don't know' without checking.\n"
@@ -84,6 +86,7 @@ def install_cursor_sync_rule(
         "alwaysApply: true\n"
         "---\n\n"
         "# Lethe Autonomous Cross-Tool Memory\n\n"
+        "Instruction rules are best effort and do not guarantee automatic capture.\n\n"
         "- **Call `lethe` FIRST on every message**: Pass the user's message verbatim as `message` and `client='cursor'` to get the relevant memory slice AND auto-save durable facts.\n"
         "- **Never wait for manual commands or ask permission**: Do not ask to save preferences or ask the user to type `lethe_store` or `lethe_recall`.\n"
         "- **Full Context / Sync**: When the user types `lethe` or starts a cross-tool task, pass it through (or call `lethe_context`) and check `lethe://sync/latest` and `lethe://handovers/active`.\n"
@@ -166,14 +169,14 @@ def install_client_rules_for_tools(
             outcomes.append(outcome)
 
     tools_set = set(target_tools)
-    if "claude" in tools_set:
+    if tools_set & {"claude", "claude-code"}:
         _record(install_claude_memory_rules(claude_dir=home / ".claude", dry_run=dry_run))
     if "cursor" in tools_set:
         cur_dir = (workspace_dir / ".cursor") if workspace_dir else (home / ".cursor")
         _record(install_cursor_sync_rule(cursor_dir=cur_dir, dry_run=dry_run))
-    if tools_set & {"antigravity", "gemini"}:
+    if tools_set & {"antigravity", "gemini", "gemini-cli"}:
         _record(install_antigravity_rules(gemini_dir=home / ".gemini", dry_run=dry_run))
-    if tools_set & {"codex", "openai", "chatgpt"}:
+    if tools_set & {"codex", "codex-desktop"}:
         _record(install_codex_rules(codex_dir=home / ".codex", dry_run=dry_run))
 
     return outcomes

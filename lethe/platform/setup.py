@@ -121,18 +121,18 @@ DEFAULT_SETUP_TOOLS: tuple[str, ...] = (
     "claude",
     "claude-desktop",
     "antigravity",
-    "gemini-desktop",
+    "gemini-cli",
     "codex",
-    "openai-desktop",
     "vscode",
 )
 
 TOOL_ALIASES: Dict[str, str] = {
-    "gemini": "gemini-desktop",
+    "claude-code": "claude",
+    "gemini": "gemini-cli",
     "openai": "openai-desktop",
     "chatgpt": "openai-desktop",
     "chatgpt-desktop": "openai-desktop",
-    "codex-desktop": "openai-desktop",
+    "codex-desktop": "codex",
 }
 
 
@@ -153,9 +153,8 @@ def get_known_tool_targets(
             home / ".cursor" / "mcp.json",
         ],
         "claude": [
-            home / ".claude.json",
-            home / ".claude" / "mcp.json",
             ws / ".mcp.json",
+            home / ".claude.json",
         ],
         "claude-desktop": [],
         "antigravity": [
@@ -164,6 +163,7 @@ def get_known_tool_targets(
             ws / ".agent" / "mcp.json",
         ],
         "gemini-desktop": [],
+        "gemini-cli": [ws / ".gemini" / "settings.json", home / ".gemini" / "settings.json"],
         "codex": [
             home / ".codex" / "config.toml",
             ws / ".codex" / "config.toml",
@@ -180,26 +180,7 @@ def get_known_tool_targets(
 
         claude_desktop_mac = app_support / "Claude" / "claude_desktop_config.json"
         targets["claude-desktop"].append(claude_desktop_mac)
-        targets["claude"].append(claude_desktop_mac)
 
-        targets["gemini-desktop"].extend([
-            app_support / "Gemini" / "gemini_desktop_config.json",
-            app_support / "Gemini" / "mcp_config.json",
-            app_support / "Google" / "Gemini" / "mcp_config.json",
-            home / ".gemini" / "settings.json",
-            home / ".gemini" / "config" / "mcp_config.json",
-            home / ".gemini" / "antigravity" / "mcp_config.json",
-            ws / ".gemini" / "settings.json",
-        ])
-
-        targets["openai-desktop"].extend([
-            app_support / "ChatGPT" / "mcp.json",
-            app_support / "OpenAI" / "ChatGPT" / "mcp.json",
-            app_support / "Codex" / "config.toml",
-            home / ".chatgpt" / "mcp.json",
-            home / ".openai" / "mcp.json",
-            home / ".codex" / "config.toml",
-        ])
 
         cline_path = (
             app_support
@@ -220,7 +201,6 @@ def get_known_tool_targets(
 
         claude_desktop_win = roaming / "Claude" / "claude_desktop_config.json"
         targets["claude-desktop"].append(claude_desktop_win)
-        targets["claude"].append(claude_desktop_win)
 
         msix_desktop = (
             local
@@ -232,26 +212,7 @@ def get_known_tool_targets(
             / "claude_desktop_config.json"
         )
         targets["claude-desktop"].append(msix_desktop)
-        targets["claude"].append(msix_desktop)
 
-        targets["gemini-desktop"].extend([
-            roaming / "Gemini" / "gemini_desktop_config.json",
-            roaming / "Gemini" / "mcp_config.json",
-            local / "Google" / "Gemini" / "mcp_config.json",
-            home / ".gemini" / "settings.json",
-            home / ".gemini" / "config" / "mcp_config.json",
-            home / ".gemini" / "antigravity" / "mcp_config.json",
-            ws / ".gemini" / "settings.json",
-        ])
-
-        targets["openai-desktop"].extend([
-            roaming / "ChatGPT" / "mcp.json",
-            roaming / "OpenAI" / "ChatGPT" / "mcp.json",
-            roaming / "Codex" / "config.toml",
-            home / ".chatgpt" / "mcp.json",
-            home / ".openai" / "mcp.json",
-            home / ".codex" / "config.toml",
-        ])
 
         cline_path = (
             roaming
@@ -269,26 +230,7 @@ def get_known_tool_targets(
 
         claude_desktop_linux = cfg_root / "Claude" / "claude_desktop_config.json"
         targets["claude-desktop"].append(claude_desktop_linux)
-        targets["claude"].append(claude_desktop_linux)
 
-        targets["gemini-desktop"].extend([
-            cfg_root / "Gemini" / "gemini_desktop_config.json",
-            cfg_root / "Gemini" / "mcp_config.json",
-            cfg_root / "google-gemini" / "mcp_config.json",
-            home / ".gemini" / "settings.json",
-            home / ".gemini" / "config" / "mcp_config.json",
-            home / ".gemini" / "antigravity" / "mcp_config.json",
-            ws / ".gemini" / "settings.json",
-        ])
-
-        targets["openai-desktop"].extend([
-            cfg_root / "ChatGPT" / "mcp.json",
-            cfg_root / "OpenAI" / "ChatGPT" / "mcp.json",
-            cfg_root / "Codex" / "config.toml",
-            home / ".chatgpt" / "mcp.json",
-            home / ".openai" / "mcp.json",
-            home / ".codex" / "config.toml",
-        ])
 
     # Register convenient aliases pointing to the exact same candidate lists
     for alias, canonical in TOOL_ALIASES.items():
@@ -444,6 +386,10 @@ def configure_tool(
     Safely merges the Lethe MCP server configuration into target JSON or TOML file.
     Non-destructive: preserves any other existing configured servers.
     """
+    canonical = TOOL_ALIASES.get(tool_name, tool_name)
+    if canonical in {"openai-desktop", "gemini-desktop"}:
+        return {"tool": tool_name, "path": None, "status": "unsupported",
+                "reason": "No verified native local MCP configuration; use the client's supported connector UI or manual instructions."}
     mcp_entry = generate_mcp_config(
         python_path=python_path,
         db_path=db_path,
@@ -462,19 +408,15 @@ def configure_tool(
         existing_data: Dict[str, Any] = {}
 
         if target_path.exists():
-            try:
-                with open(target_path, "r", encoding="utf-8") as f:
-                    existing_data = json.load(f)
-            except Exception:
-                existing_data = {}
-
+            with open(target_path, "r", encoding="utf-8") as f:
+                existing_data = json.load(f)
         if not isinstance(existing_data, dict):
-            existing_data = {}
+            raise ValueError(f"Expected JSON object in {target_path}; refusing to overwrite.")
 
-        if "mcpServers" not in existing_data:
-            existing_data["mcpServers"] = {}
-
-        existing_data["mcpServers"]["lethe"] = mcp_entry
+        server_key = "mcpServers"
+        if not isinstance(existing_data.get(server_key, {}), dict):
+            raise ValueError(f"Expected {server_key} object in {target_path}; refusing to overwrite.")
+        existing_data.setdefault(server_key, {})["lethe"] = mcp_entry
 
         if not dry_run:
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -501,12 +443,33 @@ def setup_all_tools(
     with_hooks: bool = False,
     with_rules: bool = False,
     home_dir: Optional[Path] = None,
+    auto_capture: bool = False,
+    capture_mode: str = "automatic",
 ) -> List[Dict[str, Any]]:
-    """
-    Discovers and configures all requested or detected tools.
-    Resolves tool aliases (e.g. 'gemini' -> 'gemini-desktop', 'openai'/'chatgpt' -> 'openai-desktop')
-    and avoids writing duplicate entries to the same file path in a single pass.
-    """
+    """Configure supported clients; native capture is an explicit workspace opt-in."""
+    from lethe.platform.capabilities import client_capability
+    from lethe.platform.hooks import configure_capture, install_capture_hooks, workspace_root
+
+    target_tools = tools if tools is not None else list(DEFAULT_SETUP_TOOLS)
+    capture_root = None
+    capture_plan = None
+    if auto_capture:
+        if workspace_dir is None:
+            raise ValueError("--auto-capture requires an explicit workspace root")
+        capture_root = workspace_root(workspace_dir)
+        unsupported = [t for t in target_tools if not client_capability(t)["automatic"]]
+        if capture_mode == "strict" and unsupported:
+            raise ValueError("Strict native capture unsupported for: " + ", ".join(unsupported))
+        if any(client_capability(t)["automatic"] for t in target_tools):
+            try:
+                capture_plan = install_capture_hooks(capture_root, capture_mode, dry_run=True, python_path=python_path)
+            except ValueError:
+                if capture_mode == "strict":
+                    raise
+        # Validate the config before changing any client settings.
+        if capture_plan:
+            configure_capture(capture_root, "enable", mode=capture_mode, dry_run=True)
+
     detected = detect_installed_tools(
         workspace_dir=workspace_dir,
         home_dir=home_dir,
@@ -519,11 +482,14 @@ def setup_all_tools(
     for tool in target_tools:
         lookup = tool if tool in detected else TOOL_ALIASES.get(tool, tool)
         if lookup not in detected:
+            outcomes.append({"tool": tool, "path": None, "status": "unsupported", "reason": "Unknown client"})
             continue
 
         info = detected[lookup]
         path = info["path"]
         if not path:
+            outcomes.append({"tool": tool, "path": None, "status": "unsupported",
+                             "reason": "No verified native local configuration; manual connector setup only"})
             continue
 
         resolved_key = str(Path(path).resolve())
@@ -542,7 +508,23 @@ def setup_all_tools(
         )
         outcomes.append(outcome)
 
-    if with_hooks and "claude" in target_tools:
+    if auto_capture:
+        for tool in target_tools:
+            capability = client_capability(tool)
+            if not capability["automatic"] or not capture_plan:
+                outcomes.append({"tool": tool + "_capture", "path": None, "status": "manual",
+                                 "capability": capability,
+                                 "reason": "No verified adapter/version available; use the generic capture ingest interface"})
+        if capture_plan:
+            outcomes.append(install_capture_hooks(capture_root, capture_mode, dry_run=dry_run,
+                                                  python_path=python_path, client_version=capture_plan["client_version"]))
+            outcome = configure_capture(capture_root, "enable", mode=capture_mode,
+                                        db_path=get_default_db_path(db_path),
+                                        procedures_dir=get_default_procedures_dir(procedures_dir),
+                                        clients=["claude-code"], dry_run=dry_run)
+            outcomes.append({"tool": "workspace_capture", **outcome})
+
+    if with_hooks and any(TOOL_ALIASES.get(t, t) == "claude" for t in target_tools):
         settings_file = (home_dir or Path.home()) / ".claude" / "settings.json"
         outcomes.append(
             install_claude_hooks(
@@ -613,9 +595,10 @@ def build_mcp_credentials(
         "codex_cli": f"codex mcp add lethe -- {launch_cmd}",
         "desktop_config_paths": {
             "claude_desktop": str(targets["claude-desktop"][0]),
-            "gemini_desktop": str(targets["gemini-desktop"][0]),
-            "openai_desktop": str(targets["openai-desktop"][0]),
+            "gemini_desktop": None,
+            "openai_desktop": None,
         },
+        "manual_clients": ["gemini-desktop", "chatgpt"],
         "desktop_system_prompt": get_desktop_system_prompt(),
     }
 
@@ -644,10 +627,10 @@ def format_mcp_credentials(
         f" Shared Runbooks (--procedures): {creds['procedures_dir']}",
         f" Command:                       {creds['mcp_entry']['command']}",
         "",
-        " [1] Desktop & IDE JSON (Claude Desktop / Gemini Desktop / ChatGPT / Cursor / Antigravity)",
+        " [1] Supported MCP JSON clients (Claude Desktop / Gemini CLI / Cursor / Antigravity)",
         f"     Claude Desktop:  {dpaths['claude_desktop']}",
-        f"     Gemini Desktop:  {dpaths['gemini_desktop']} (or ~/.gemini/settings.json)",
-        f"     OpenAI Desktop:  {dpaths['openai_desktop']} (or ~/.codex/config.toml)",
+        "     Gemini CLI:      ~/.gemini/settings.json (not Gemini Desktop)",
+        "     ChatGPT/Gemini Desktop: manual connector setup; no verified native local config",
         "     Cursor:          Settings -> Tools & MCP -> Add new global MCP server",
         "     Antigravity:     Manage MCP Servers -> View raw config",
         "-" * 80,
@@ -666,9 +649,9 @@ def format_mcp_credentials(
         " Or auto-wire all detected CLI & Desktop tools at once:",
         "   lethe setup",
         "   lethe setup --tool claude-desktop",
-        "   lethe setup --tool gemini-desktop",
-        "   lethe setup --tool openai-desktop",
-        "   lethe setup --with-hooks    # also install Claude hooks + autonomous client rules",
+        "   lethe setup --tool gemini-cli",
+        "   lethe setup --tool claude --auto-capture --workspace-root /path/to/project",
+        "   lethe setup --with-hooks    # legacy Claude hooks + best-effort client rules",
         "",
         " [4] Autonomous Desktop Custom Instructions (Claude / Gemini / ChatGPT Projects)",
         "-" * 80,

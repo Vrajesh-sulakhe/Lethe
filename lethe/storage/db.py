@@ -13,7 +13,7 @@ from lethe.storage.fts_index import (
     sync_fts_node as _fts_sync_node,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def get_current_workspace_id(start_path: Path | str = ".") -> str:
@@ -294,7 +294,13 @@ class DatabaseManager:
         if current_ver < self.SCHEMA_VERSION:
             cursor.execute(f"PRAGMA user_version = {int(self.SCHEMA_VERSION)};")
 
+        from lethe.core.projects import ensure_project_schema
+        ensure_project_schema(self.conn)
         self._fts_enabled = _fts_ensure_table(cursor)
+        if current_ver < 5 and self._fts_enabled:
+            rows = cursor.execute("SELECT * FROM memories WHERE status NOT IN ('tombstoned', 'quarantined')").fetchall()
+            for row in rows:
+                _fts_sync_node(cursor, self._row_to_node(row), True)
         self.conn.commit()
 
     def get_schema_version(self) -> int:

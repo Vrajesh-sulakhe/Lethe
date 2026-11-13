@@ -1,6 +1,7 @@
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 from lethe.core.drift import check_code_drift
+from lethe.core.projects import project_root
 from lethe.core.engine import LetheMemory
 from lethe.models import MemoryStatus
 
@@ -62,10 +63,11 @@ class LetheDoctor:
             try:
                 from lethe.platform.setup import detect_installed_tools
                 tools = detect_installed_tools()
-                connected = [k for k, v in tools.items() if v.get("is_configured")]
+                configurable = {k: v for k, v in tools.items() if v.get("path") is not None}
+                connected = [k for k, v in configurable.items() if v.get("is_configured")]
                 checks["mcp_tools"] = {
                     "status": "PASS",
-                    "detected_count": len(tools),
+                    "detected_count": len(configurable),
                     "connected_count": len(connected),
                     "connected_tools": connected,
                 }
@@ -243,7 +245,8 @@ class LetheDoctor:
 
         for m in all_memories:
             if m.code_anchor:
-                is_drifted, reason = check_code_drift(m.code_anchor, workspace_dir=m.workspace_id)
+                root = m.metadata.get("workspace_root") or project_root(self.db, m.workspace_id)
+                is_drifted, reason = check_code_drift(m.code_anchor, workspace_dir=root)
                 if is_drifted:
                     drifted.append({
                         "id": m.id,

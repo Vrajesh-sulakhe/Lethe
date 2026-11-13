@@ -108,12 +108,60 @@ def test_cross_tool_turn_cake_and_desktop_visibility(tmp_path):
     api_slice = cur.process_turn("help me build an API endpoint for our storage layer", client_id="cursor")
     assert "SQLite with WAL" in api_slice["context_text"]
 
-    # 4. Untrusted workspace remains strictly blocked from global_desktop
+    # 4. Untrusted workspace remains strictly blocked from global_desktop (including project-targeted turns)
     cur.security.untrust_workspace("evil_vendor")
     evil = LetheMemory(db_path=db_path, procedures_dir=procs, workspace_id="evil_vendor", security_config_path=sec_cfg)
     evil.store("Malicious vendor bait secret-xyz", category="decision", scope="project", workspace_id="evil_vendor")
     evil.close()
     assert cd.recall("secret-xyz").is_abstention is True
+    assert "secret-xyz" not in cd.process_turn("lethe evil_vendor", client_id="claude-desktop")["context_text"]
+    evil_turn = cd.process_turn("lethe project evil_vendor", client_id="claude-desktop")
+    assert evil_turn["is_abstention"] is True
+    assert "secret-xyz" not in evil_turn["context_text"]
+
+    # Non-desktop workspace cannot cross-read another repo via project-targeted turn
+    other = LetheMemory(db_path=db_path, procedures_dir=procs, workspace_id="other_repo", security_config_path=sec_cfg)
+    other.store("Private repo-only decision secret-abc", category="decision", scope="project", workspace_id="other_repo")
+    other.close()
+    cross_turn = cur.process_turn("lethe project other_repo", client_id="cursor")
+    assert cross_turn["is_abstention"] is True
+    assert "secret-abc" not in cross_turn["context_text"]
+
+    # 5. Cake & Slice guarantees:
+    # - Active project workspace gets ## Project context slice even on new vocabulary + excludes other_repo sync delta
+    ui_turn = cur.process_turn(
+        "for the lethe ui just add the graph view with nodes n their leaf nodes",
+        client_id="cursor",
+        token_budget=260,
+    )
+    assert ui_turn["is_abstention"] is False
+    assert "SQLite with WAL" in ui_turn["context_text"]
+    assert "secret-abc" not in ui_turn["context_text"]
+    assert ui_turn["tokens_used"] <= 260
+
+    # - Long conversational prompt with filler words recalls matching slice
+    cur.store("Cake and slice architecture uses Knapsack BPE packing", category="architecture", workspace_id="Lethe")
+    long_turn = cur.process_turn(
+        "the last part the cake and slice architecture is it working properly if yes then good if not identify the issue and fix it and make sure it works the way it is intended to work",
+        client_id="cursor",
+        token_budget=300,
+    )
+    assert "Knapsack BPE packing" in long_turn["context_text"]
+    assert "## Relevant to this message" in long_turn["context_text"]
+    assert long_turn["tokens_used"] <= 300
+
+    # - Continuation / progress queries ('continue', 'so now how r the thing going on?') recall recent slice
+    cont_turn = cd.process_turn("so now how r the thing going on?", client_id="claude-desktop", token_budget=300)
+    assert cont_turn["is_abstention"] is False
+    assert "Knapsack BPE packing" in cont_turn["context_text"] or "SQLite with WAL" in cont_turn["context_text"]
+    assert cont_turn["tokens_used"] <= 300
+
+    # - Boot turn ('lethe') preserves ## New from other tools sync delta instead of swallowing it
+    cur.store("New runbook added in Cursor", category="architecture", workspace_id="Lethe")
+    boot_with_sync = cd.process_turn("lethe", client_id="claude-desktop", token_budget=350)
+    assert "## New from other tools" in boot_with_sync["context_text"]
+    assert "New runbook added in Cursor" in boot_with_sync["context_text"]
+    assert boot_with_sync["tokens_used"] <= 350
 
     cur.close()
     cd.close()

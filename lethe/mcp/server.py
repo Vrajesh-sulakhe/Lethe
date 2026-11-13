@@ -3,7 +3,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import anyio
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import MCPServer, Context
+from lethe.mcp.workspaces import resolve_client_workspace
+from lethe.core.projects import visible_projects, project_root
 from mcp.server.subscriptions import ResourceUpdated
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -62,7 +64,7 @@ def create_mcp_server(
         "lethe-memory",
         instructions=LETHE_MCP_INSTRUCTIONS,
     )
-    memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir)
+    memory = LetheMemory(db_path=db_path, procedures_dir=procedures_dir, workspace_id="global_desktop")
     server._lethe_memory = memory
     health = memory.check_health()
     if not health.get("healthy", False):
@@ -104,6 +106,8 @@ def create_mcp_server(
         workspace_id: Optional[str] = None,
         session_id: Optional[str] = None,
         token_budget: int = 600,
+        workspace_root: Optional[str] = None,
+        ctx: Context = None,
     ) -> str:
         """
         CALL THIS FIRST ON EVERY USER MESSAGE, before replying. Pass the user's latest message verbatim as `message`.
@@ -116,6 +120,7 @@ def create_mcp_server(
         pass it as-is to load their full memory. Set `client` to your app name (e.g. "claude-desktop",
         "cursor", "antigravity", "codex") so cross-tool updates are tracked.
         """
+        workspace_id, _ = resolve_client_workspace(memory, workspace_id, workspace_root, ctx)
         with memory.db._lock:
             result = memory.process_turn(
                 message,
@@ -144,12 +149,15 @@ def create_mcp_server(
         session_id: Optional[str] = None,
         include_handover: bool = True,
         mark_read: bool = False,
+        workspace_root: Optional[str] = None,
+        ctx: Context = None,
     ) -> str:
         """
         Boot-strap conversation context in one call: returns global user identity, recent accessible memories,
         active cross-tool handover packet, and unread sync deltas within strict BPE token budget.
         Call silently at session start instead of waiting for manual recall commands.
         """
+        workspace_id, _ = resolve_client_workspace(memory, workspace_id, workspace_root, ctx)
         with memory.db._lock:
             payload = memory.build_session_context(
                 token_budget=token_budget,
@@ -174,6 +182,8 @@ def create_mcp_server(
         model_name: Optional[str] = None,
         remaining_context_tokens: Optional[int] = None,
         session_id: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        ctx: Context = None,
     ) -> str:
         """
         MANDATORY AUTOMATIC RECALL: Execute this tool automatically whenever the user asks ANY question about
@@ -182,6 +192,7 @@ def create_mcp_server(
         and browse queries ('recent memories', 'latest', 'everything').
         NEVER wait for the user to type 'lethe recall' or say 'I have no record' without querying this tool first!
         """
+        workspace_id, _ = resolve_client_workspace(memory, workspace_id, workspace_root, ctx)
         with memory.db._lock:
             res = memory.recall(
                 query,
@@ -202,6 +213,10 @@ def create_mcp_server(
                 "context_text": res.context_text,
                 "conflicts": res.conflicts_detected,
                 "drift_warnings": res.drift_warnings,
+                "matched_workspaces": sorted({m.workspace_id for m in res.memories if m.workspace_id}),
+                "memories": [{"id": m.id, "workspace_id": m.workspace_id, "scope": m.scope,
+                              "code_anchor": m.code_anchor.model_dump() if m.code_anchor else None}
+                             for m in res.memories],
             },
             indent=2,
         )
@@ -221,20 +236,24 @@ def create_mcp_server(
         code_file: Optional[str] = None,
         code_symbol: Optional[str] = None,
         code_sha: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        ctx: Context = None,
     ) -> str:
         """
         MANDATORY AUTOMATIC CAPTURE: Proactively and silently store durable facts (identity, preferences,
         snacks, foods, tools, architectural decisions, or code anchors) in relational, semantic, procedural, or ephemeral tier.
         CRITICAL: Never ask the user 'do you want me to log this?' or 'should I save this?'. Silently execute this tool
         in the background alongside your conversational reply.
-        Scope defaults to 'global' for personal/identity/preference categories and Desktop contexts,
-        and 'project' for repository-scoped facts.
+        Scope defaults to 'global' for personal/identity/preference categories, otherwise 'project'.
+        Pass the client's absolute workspace_root for project facts and relative code_file anchors.
+        The MCP server's launch directory is not the client's project.
         """
         try:
             tier_enum = StorageTier(tier.lower())
         except ValueError:
             tier_enum = StorageTier.SEMANTIC
 
+        workspace_id, resolved_root = resolve_client_workspace(memory, workspace_id, workspace_root, ctx)
         from lethe.models import CodeAnchor
         anchor: Optional[CodeAnchor] = None
         if code_file:
@@ -245,8 +264,6 @@ def create_mcp_server(
             )
 
         effective_scope = scope
-        if effective_scope is None and workspace_id is None and memory.workspace_id == "global_desktop":
-            effective_scope = "global"
 
         with memory.db._lock:
             node = memory.store(
@@ -261,6 +278,7 @@ def create_mcp_server(
                 workspace_id=workspace_id,
                 scope=effective_scope,
                 code_anchor=anchor,
+                workspace_root=resolved_root,
             )
         payload = {
             "status": node.status.value,
@@ -352,6 +370,7 @@ def create_mcp_server(
         workspace_id: Optional[str] = None,
         tier: Optional[str] = None,
         scope: Optional[str] = None,
+        ctx: Context = None,
     ) -> str:
         """Inspect newest stored memories with status, tier, trust level, scope, and workspace filter."""
         target_status = None
@@ -367,12 +386,13 @@ def create_mcp_server(
             except ValueError:
                 pass
 
+        workspace_id, _ = resolve_client_workspace(memory, workspace_id, None, ctx)
         target_ws = workspace_id or memory.workspace_id
         is_trusted = memory.security.is_workspace_trusted(target_ws)
         with memory.db._lock:
             memories = memory.db.list_memories(
                 status=target_status,
-                workspace_id=target_ws,
+                workspace_id=None if target_ws == "global_desktop" and is_trusted else target_ws,
                 tier=target_tier,
                 scope=scope,
                 branch=memory.current_branch,
@@ -392,12 +412,20 @@ def create_mcp_server(
                 "trust": m.trust_level,
                 "status": m.status.value,
                 "workspace_id": m.workspace_id,
+                "workspace_root": m.metadata.get("workspace_root") or project_root(memory.db, m.workspace_id),
+                "code_anchor": m.code_anchor.model_dump() if m.code_anchor else None,
                 "branch": m.branch,
                 "session": m.source_session,
             }
             for m in visible_memories[:limit]
         ]
         return json.dumps({"total_count": len(visible_memories), "items": output}, indent=2)
+
+    @server.tool(annotations=READ_ONLY_TOOL)
+    def lethe_projects(workspace_id: Optional[str] = None, ctx: Context = None) -> str:
+        """List accessible project names and registered roots; use exact workspace_id to disambiguate recall."""
+        workspace_id, _ = resolve_client_workspace(memory, workspace_id, None, ctx)
+        return json.dumps({"projects": visible_projects(memory, workspace_id)}, indent=2)
 
     @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_procedures_list() -> str:
