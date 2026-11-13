@@ -75,7 +75,7 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
 
 # Research-backed slice ceiling (NoLiMa / RULER / Chroma Context Rot show
 # sharp accuracy decay past 4K-32K tokens, especially with distractors).
-SAFE_SLICE_CEILING_TOKENS = 4096
+SAFE_SLICE_CEILING_TOKENS = 5000
 
 
 def resolve_model_context_window(model_name: Optional[str]) -> Optional[int]:
@@ -92,7 +92,7 @@ def resolve_model_context_window(model_name: Optional[str]) -> Optional[int]:
 
 
 def compute_effective_token_budget(
-    token_budget: int = 500,
+    token_budget: int = 5000,
     model_name: Optional[str] = None,
     max_context_tokens: Optional[int] = None,
     remaining_context_tokens: Optional[int] = None,

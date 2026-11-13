@@ -312,7 +312,7 @@ class LetheMemory:
     def recall(
         self,
         query: str,
-        token_budget: int = 500,
+        token_budget: int = 5000,
         as_of_time: Optional[float] = None,
         entity_filter: Optional[str] = None,
         min_relevance: float = 0.12,
@@ -872,7 +872,7 @@ class LetheMemory:
 
     def build_session_context(
         self,
-        token_budget: int = 800,
+        token_budget: int = 5000,
         workspace_id: Optional[str] = None,
         model_name: Optional[str] = None,
         remaining_context_tokens: Optional[int] = None,
@@ -1006,7 +1006,7 @@ class LetheMemory:
         client_id: Optional[str] = None,
         workspace_id: Optional[str] = None,
         session_id: Optional[str] = None,
-        token_budget: int = 600,
+        token_budget: int = 5000,
         capture: bool = True,
         include_sync: bool = True,
     ) -> Dict[str, Any]:

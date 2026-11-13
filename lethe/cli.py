@@ -925,7 +925,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # recall command
     p_recall = subparsers.add_parser("recall", parents=[common], help="Recall token-budgeted memories")
     p_recall.add_argument("query", help="Natural language query")
-    p_recall.add_argument("--budget", type=int, default=400, help="Strict token budget")
+    p_recall.add_argument("--budget", type=int, default=5000, help="Strict token budget")
     p_recall.add_argument("--model", default=None, help="Target model context profile (e.g. tiny-4k, claude-sonnet-4)")
     p_recall.add_argument("--workspace", default=None, help="Workspace filter")
     p_recall.add_argument("--entity", default=None, help="Optional entity.attribute relational filter")
@@ -1096,11 +1096,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_hook_turn = hook_sub.add_parser("turn", parents=[common], help="Per-message hook: serve the relevant memory slice and auto-capture durable facts (reads hook JSON on stdin)")
     p_hook_turn.add_argument("--client", required=True, help="Client ID (e.g. claude-code, cursor, codex)")
     p_hook_turn.add_argument("--message", help="User message (defaults to the 'prompt' field of stdin hook JSON)")
-    p_hook_turn.add_argument("--max-tokens", type=int, default=600, help="Token budget for injected memory")
+    p_hook_turn.add_argument("--max-tokens", type=int, default=5000, help="Token budget for injected memory")
     p_hook_turn.add_argument("--json", action="store_true", help="Output structured JSON")
     p_hook_boot = hook_sub.add_parser("boot", parents=[common], help="Session-start hook: print the user's memory boot context")
     p_hook_boot.add_argument("--client", required=True, help="Client ID (e.g. claude-code)")
-    p_hook_boot.add_argument("--max-tokens", type=int, default=800, help="Token budget for boot context")
+    p_hook_boot.add_argument("--max-tokens", type=int, default=5000, help="Token budget for boot context")
     p_hook_boot.add_argument("--json", action="store_true", help="Output structured JSON")
 
     p_capture = subparsers.add_parser("capture", parents=[common], help="Explicit workspace capture and client-independent JSON events")
@@ -1119,7 +1119,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_turn = subparsers.add_parser("turn", parents=[common], help="Run one memory turn on a message: recall the relevant slice + auto-capture facts")
     p_turn.add_argument("message", help="The user message")
     p_turn.add_argument("--client", default="cli", help="Client ID")
-    p_turn.add_argument("--max-tokens", type=int, default=600, help="Token budget")
+    p_turn.add_argument("--max-tokens", type=int, default=5000, help="Token budget")
     p_turn.add_argument("--json", action="store_true", help="Output structured JSON")
 
     args = parser.parse_args(argv)

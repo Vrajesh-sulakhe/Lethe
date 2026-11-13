@@ -105,7 +105,7 @@ def create_mcp_server(
         client: Optional[str] = None,
         workspace_id: Optional[str] = None,
         session_id: Optional[str] = None,
-        token_budget: int = 600,
+        token_budget: int = 5000,
         workspace_root: Optional[str] = None,
         ctx: Context = None,
     ) -> str:
@@ -140,7 +140,7 @@ def create_mcp_server(
 
     @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_context(
-        token_budget: int = 800,
+        token_budget: int = 5000,
         workspace_id: Optional[str] = None,
         model_name: Optional[str] = None,
         remaining_context_tokens: Optional[int] = None,
@@ -175,7 +175,7 @@ def create_mcp_server(
     @server.tool(annotations=READ_ONLY_TOOL)
     def lethe_recall(
         query: str,
-        token_budget: int = 500,
+        token_budget: int = 5000,
         workspace_id: Optional[str] = None,
         as_of_time: Optional[float] = None,
         entity_filter: Optional[str] = None,

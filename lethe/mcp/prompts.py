@@ -51,7 +51,7 @@ def register_lethe_prompts(server: MCPServer, memory: Any) -> None:
     )
     def session_boot(
         workspace_id: Optional[str] = None,
-        token_budget: int = 800,
+        token_budget: int = 5000,
     ) -> List[Dict[str, str]]:
         with memory.db._lock:
             bundle = memory.build_session_context(
@@ -100,7 +100,7 @@ def register_lethe_prompts(server: MCPServer, memory: Any) -> None:
         with memory.db._lock:
             branch = memory.current_branch
             hp = memory.db.get_latest_handover_packet(branch=branch)
-            ctx = memory.build_session_context(token_budget=600, branch=branch)
+            ctx = memory.build_session_context(token_budget=5000, branch=branch)
         payload = {
             "branch": branch,
             "requested_goal": task_goal,
