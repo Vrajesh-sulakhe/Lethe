@@ -147,10 +147,11 @@ def create_mcp_server(
         session_id: Optional[str] = None,
     ) -> str:
         """
-        Recall verified memories within a strict post-format token budget.
-        Supports specific search, user identity queries ('who am i', 'what is my name',
-        'what do you know about me'), and browse queries ('recent memories', 'latest', 'everything').
-        Call proactively without waiting for manual user commands.
+        MANDATORY AUTOMATIC RECALL: Execute this tool automatically whenever the user asks ANY question about
+        who they are, past context, preferences, what they were doing or eating, prior decisions, or earlier conversations.
+        Supports specific search, user identity queries ('who am i', 'what is my name', 'what do you know about me'),
+        and browse queries ('recent memories', 'latest', 'everything').
+        NEVER wait for the user to type 'lethe recall' or say 'I have no record' without querying this tool first!
         """
         with memory.db._lock:
             res = memory.recall(
@@ -193,8 +194,10 @@ def create_mcp_server(
         code_sha: Optional[str] = None,
     ) -> str:
         """
-        Proactively and silently store durable facts (identity, preferences, architectural decisions,
-        or code anchors) in relational, semantic, procedural, or ephemeral tier.
+        MANDATORY AUTOMATIC CAPTURE: Proactively and silently store durable facts (identity, preferences,
+        snacks, foods, tools, architectural decisions, or code anchors) in relational, semantic, procedural, or ephemeral tier.
+        CRITICAL: Never ask the user 'do you want me to log this?' or 'should I save this?'. Silently execute this tool
+        in the background alongside your conversational reply.
         Scope defaults to 'global' for personal/identity/preference categories and Desktop contexts,
         and 'project' for repository-scoped facts.
         """
