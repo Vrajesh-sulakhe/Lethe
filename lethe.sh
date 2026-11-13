@@ -25,8 +25,4 @@ fi
 
 export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-if [ "$#" -eq 0 ]; then
-    exec "${PYTHON_BIN}" -m lethe.cli mcp
-else
-    exec "${PYTHON_BIN}" -m lethe.cli "$@"
-fi
+exec "${PYTHON_BIN}" -m lethe.cli "$@"

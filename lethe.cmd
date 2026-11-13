@@ -54,9 +54,5 @@ if defined PYTHONPATH (
     set "PYTHONPATH=%SCRIPT_DIR%"
 )
 
-if "%~1"=="" (
-    "%PYTHON_BIN%" -m lethe.cli mcp
-) else (
-    "%PYTHON_BIN%" -m lethe.cli %*
-)
+"%PYTHON_BIN%" -m lethe.cli %*
 exit /b %ERRORLEVEL%

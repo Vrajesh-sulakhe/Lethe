@@ -13,32 +13,27 @@ python --version
 
 ---
 
-## 2. Clone & Environment Setup
+## 2. One-Command Global Setup (Recommended)
 
-Open **PowerShell** (or Windows Terminal) and run:
+Open **PowerShell** (or Windows Terminal) and run either:
 
 ```powershell
-# 1. Clone repository
-git clone https://github.com/vrajeshsulakhe/Lethe.git
-cd Lethe
-
-# 2. Create virtual environment
-python -m venv .venv
-
-# 3. Activate virtual environment
-# In PowerShell:
-.venv\Scripts\Activate.ps1
-# (If PowerShell blocks scripts, run: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass)
-# Or in Command Prompt:
-# .venv\Scripts\activate.bat
-
-# 4. Set UTF-8 encoding for Windows terminal
-$env:PYTHONIOENCODING="utf-8"
-
-# 5. Install Lethe in editable mode with all dependencies
-pip install -e .
-pip install pytest
+# Option 1: Zero-clone install (works from anywhere)
+irm https://raw.githubusercontent.com/Vrajesh-sulakhe/Lethe/main/install.ps1 | iex
 ```
+
+Or if you cloned the repo:
+
+```powershell
+# Option 2: Clone & install global 'lethe' CLI onto Windows PATH
+git clone https://github.com/Vrajesh-sulakhe/Lethe.git
+cd Lethe
+.\install.bat
+```
+
+Once installed, open any PowerShell or CMD window and run `lethe` — you'll get the exact same command menu as macOS (`mcp`, `creds`, `health`, `store`, `recall`, `setup`, `ui`, etc.).
+
+*(Manual venv alternative: `py -m venv .venv`, `.venv\Scripts\Activate.ps1`, `pip install -e .`, `pip install pytest`, and `python -m lethe.cli install-cli`.)*
 
 ---
 
@@ -108,7 +103,7 @@ Starts the Model Context Protocol server over `stdio` so Cursor, Claude Code, An
 
 ## 6. Windows-Specific Tips & FAQ
 
-* **Global CLI on Windows (No venv activation needed):** Run `uv tool install .` (then `uv tool update-shell` and reopen PowerShell) or `pip install --user -e .` with Python's `Scripts` folder on `PATH`. If `lethe` is still not found on `PATH`, run `py -m lethe.cli ...` or `.\lethe.cmd ...` from the repo folder.
+* **Global CLI on Windows (No venv activation needed):** Run `.\install.bat` (or `python -m lethe.cli install-cli`) to install `lethe` / `lethe-mcp` into `%USERPROFILE%\.local\bin` and add it to Windows User `PATH` automatically. You can also use `uv tool install .` + `uv tool update-shell`, or run `.\lethe.cmd` inside the repo.
 * **File Paths:** All Lethe modules use `pathlib.Path`, so you never need to worry about forward vs. backslashes (`\` vs `/`).
 * **Database Locks:** SQLite in Lethe is configured with `PRAGMA busy_timeout = 30000;` and WAL mode, preventing Windows file-locking collisions.
 * **No C++ Build Tools Needed:** Lethe uses a pure-Python cosine vector similarity fallback, meaning you do **not** need Microsoft Visual Studio C++ Build Tools installed.

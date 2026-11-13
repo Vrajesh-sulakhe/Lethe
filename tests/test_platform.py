@@ -596,9 +596,12 @@ def test_windows_executable_resolution_and_quoting(monkeypatch):
 
     monkeypatch.setattr(setup_mod.sys, "platform", "win32")
 
-    # 1. Must never choose cwd lethe.cmd wrapper when use_wrapper=False
+    # 1. Must never choose cwd lethe.cmd or extensionless shim when use_wrapper=False
     monkeypatch.setattr(setup_mod.shutil, "which", lambda name: r"C:\repo\lethe.cmd")
     monkeypatch.setattr(setup_mod.sys, "executable", r"C:\nonexistent\python.exe")
+    assert setup_mod.get_default_lethe_executable() is None
+
+    monkeypatch.setattr(setup_mod.shutil, "which", lambda name: r"C:\Users\Ajit\.local\bin\lethe")
     assert setup_mod.get_default_lethe_executable() is None
 
     # 2. Accepts real .exe on PATH and formats double-quoted Windows command line
@@ -636,6 +639,69 @@ def test_cli_handles_cp437_windows_console_encoding():
             res = subprocess.run(base + cmd_args, capture_output=True, text=True, env=env)
             assert res.returncode == 0, f"Command {cmd_args} failed under cp437: {res.stderr}"
             assert "UnicodeEncodeError" not in res.stderr
+
+
+def test_install_global_cli_windows_and_posix(monkeypatch):
+    import lethe.platform.setup as setup_mod
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        win_bin = Path(tmpdir) / "win_bin"
+        posix_bin = Path(tmpdir) / "posix_bin"
+
+        # 1. Windows mode: generates .cmd + Git Bash shims and calls PATH updater
+        monkeypatch.setattr(setup_mod.sys, "platform", "win32")
+        monkeypatch.setattr(setup_mod, "_ensure_windows_user_path", lambda target: True)
+        res_win = setup_mod.install_global_cli(bin_dir=win_bin, update_path=True, dry_run=False)
+        assert res_win["path_updated"] is True
+        assert (win_bin / "lethe.cmd").exists()
+        assert (win_bin / "lethe-mcp.cmd").exists()
+        assert (win_bin / "lethe").exists()
+        assert (win_bin / "lethe-mcp").exists()
+        cmd_text = (win_bin / "lethe.cmd").read_text(encoding="utf-8")
+        assert "PYTHONIOENCODING=utf-8" in cmd_text
+        assert "%*" in cmd_text
+
+        # PATH merge idempotency (case-insensitive on Windows)
+        merged, changed = setup_mod._merge_path_entries(r"C:\Windows\System32", win_bin, sep=";")
+        assert changed is True
+        merged2, changed2 = setup_mod._merge_path_entries(merged.upper(), win_bin, sep=";")
+        assert changed2 is False
+
+        # 2. POSIX mode: installs executable symlinks/wrappers
+        monkeypatch.setattr(setup_mod.sys, "platform", "darwin")
+        res_mac = setup_mod.install_global_cli(bin_dir=posix_bin, dry_run=False)
+        assert len(res_mac["installed"]) == 2
+        assert (posix_bin / "lethe").exists()
+        assert (posix_bin / "lethe-mcp").exists()
+
+
+def test_cli_bare_menu_and_install_cli_dry_run():
+    import subprocess
+    import sys
+
+    # Bare `python -m lethe.cli` prints the command menu
+    r_menu = subprocess.run([sys.executable, "-m", "lethe.cli"], capture_output=True, text=True, check=True)
+    for sub in ("mcp", "creds", "health", "store", "recall", "setup", "ui", "install-cli"):
+        assert sub in r_menu.stdout
+
+    # Bare `./lethe.sh` also prints the menu instead of hanging in MCP stdio
+    repo_root = Path(__file__).resolve().parents[1]
+    r_sh = subprocess.run([str(repo_root / "lethe.sh")], capture_output=True, text=True, timeout=5, check=True)
+    assert "Available commands" in r_sh.stdout
+    assert "install-cli" in r_sh.stdout
+
+    # `install-cli --dry-run --json` returns clean plan without touching disk
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target_bin = Path(tmpdir) / "nonexistent_bin"
+        r_inst = subprocess.run(
+            [sys.executable, "-m", "lethe.cli", "install-cli", "--bin-dir", str(target_bin), "--dry-run", "--json"],
+            capture_output=True, text=True, check=True,
+        )
+        payload = json.loads(r_inst.stdout)
+        assert payload["dry_run"] is True
+        assert {item["command"] for item in payload["installed"]} == {"lethe", "lethe-mcp"}
+        assert not target_bin.exists()
+
 
 
 

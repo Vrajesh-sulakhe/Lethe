@@ -12,6 +12,7 @@ from lethe.platform.setup import (
     generate_mcp_config,
     get_default_db_path,
     get_default_procedures_dir,
+    install_global_cli,
     setup_all_tools,
 )
 
@@ -23,6 +24,7 @@ __all__ = [
     "generate_mcp_config",
     "get_default_db_path",
     "get_default_procedures_dir",
+    "install_global_cli",
     "setup_all_tools",
 ]
 

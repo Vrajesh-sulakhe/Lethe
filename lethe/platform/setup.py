@@ -23,12 +23,16 @@ def get_default_python_executable() -> str:
 def get_default_lethe_executable() -> Optional[str]:
     """
     Returns the absolute path to an installed `lethe` executable.
-    Skips batch/shell wrapper scripts (.cmd/.bat/.sh) so cwd wrappers do not
-    shadow real binaries or trigger Electron/Node Windows spawn EINVAL errors.
+    On Windows, restricts PATH lookup to `.exe` binaries so `.cmd`/`.bat` or
+    extensionless Git Bash shims never trigger Node/Electron spawn EINVAL errors.
     """
-    names = ("lethe.exe", "lethe") if sys.platform == "win32" else ("lethe",)
-    for name in names:
-        found = shutil.which(name)
+    if sys.platform == "win32":
+        for name in ("lethe.exe", "lethe"):
+            found = shutil.which(name)
+            if found and Path(found).suffix.lower() == ".exe":
+                return os.path.abspath(found)
+    else:
+        found = shutil.which("lethe")
         if found and Path(found).suffix.lower() not in {".cmd", ".bat", ".sh"}:
             return os.path.abspath(found)
 
@@ -464,5 +468,187 @@ def format_mcp_credentials(
         "=" * 80,
     ]
     return "\n".join(lines)
+
+
+def get_default_bin_dir(bin_dir: Optional[Path | str] = None) -> Path:
+    """Returns the user-level bin directory (~/.local/bin) for global CLI launchers."""
+    target = Path(os.path.expanduser(str(bin_dir))) if bin_dir else Path.home() / ".local" / "bin"
+    return Path(os.path.abspath(str(target)))
+
+
+def _normalize_path_entry(entry: str) -> str:
+    cleaned = os.path.expanduser(entry.strip().strip('"'))
+    norm = os.path.normpath(cleaned)
+    return norm.lower() if sys.platform == "win32" else norm
+
+
+def _is_dir_on_path(target_dir: Path, path_env: Optional[str] = None) -> bool:
+    raw = os.environ.get("PATH", "") if path_env is None else path_env
+    if not raw:
+        return False
+    target_norm = _normalize_path_entry(str(target_dir))
+    return any(_normalize_path_entry(p) == target_norm for p in raw.split(os.pathsep) if p.strip())
+
+
+def _merge_path_entries(existing_path: str, target_dir: Path, sep: str = ";") -> tuple[str, bool]:
+    """Appends target_dir to a PATH string only if an equivalent entry is not present."""
+    parts = [p for p in existing_path.split(sep) if p.strip()]
+    target_norm = _normalize_path_entry(str(target_dir))
+    if any(_normalize_path_entry(p) == target_norm for p in parts):
+        return existing_path, False
+    updated = sep.join([*parts, str(target_dir)]) if parts else str(target_dir)
+    return updated, True
+
+
+def _ensure_windows_user_path(target_dir: Path) -> bool:
+    """Adds target_dir to Windows HKCU\\Environment\\Path and notifies the shell."""
+    if sys.platform != "win32":
+        return False
+
+    import ctypes
+    import winreg
+
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER,
+        "Environment",
+        0,
+        winreg.KEY_READ | winreg.KEY_SET_VALUE,
+    ) as key:
+        try:
+            current_val, reg_type = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            current_val, reg_type = "", winreg.REG_EXPAND_SZ
+
+        updated_val, changed = _merge_path_entries(str(current_val or ""), target_dir, sep=";")
+        if not changed:
+            return False
+
+        if reg_type not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+            reg_type = winreg.REG_EXPAND_SZ
+        winreg.SetValueEx(key, "Path", 0, reg_type, updated_val)
+
+    try:
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, None)
+    except Exception:
+        pass
+    return True
+
+
+def _build_windows_cmd_shim(target_exe: Optional[Path], python_exe: str, module_name: str) -> str:
+    if target_exe and target_exe.exists():
+        launch = f'"{target_exe}"'
+    else:
+        launch = f'"{python_exe}" -m {module_name}'
+    return (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        'set "PYTHONUNBUFFERED=1"\r\n'
+        'set "PYTHONIOENCODING=utf-8"\r\n'
+        f"{launch} %*\r\n"
+        "exit /b %ERRORLEVEL%\r\n"
+    )
+
+
+def _build_posix_sh_shim(target_bin: Optional[Path], python_exe: str, module_name: str) -> str:
+    if target_bin and target_bin.exists():
+        exec_line = f'exec "{target_bin.as_posix()}" "$@"'
+    else:
+        exec_line = f'exec "{Path(python_exe).as_posix()}" -m {module_name} "$@"'
+    return (
+        "#!/usr/bin/env sh\n"
+        "export PYTHONUNBUFFERED=1\n"
+        "export PYTHONIOENCODING=utf-8\n"
+        f"{exec_line}\n"
+    )
+
+
+def install_global_cli(
+    bin_dir: Optional[Path | str] = None,
+    update_path: bool = True,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Installs global `lethe` and `lethe-mcp` launchers into ~/.local/bin (or bin_dir)
+    and ensures Windows User PATH includes that directory so bare `lethe` prints
+    the full CLI menu from any terminal folder.
+    """
+    target_bin = get_default_bin_dir(bin_dir)
+    python_exe = get_default_python_executable()
+    scripts_dir = Path(python_exe).parent
+    commands = [
+        ("lethe", "lethe.cli"),
+        ("lethe-mcp", "lethe.mcp.server"),
+    ]
+
+    installed: List[Dict[str, str]] = []
+    if not dry_run:
+        target_bin.mkdir(parents=True, exist_ok=True)
+
+    if sys.platform == "win32":
+        for cmd_name, module_name in commands:
+            exe_candidate = scripts_dir / f"{cmd_name}.exe"
+            exe_target = exe_candidate if exe_candidate.exists() else None
+
+            cmd_path = target_bin / f"{cmd_name}.cmd"
+            sh_path = target_bin / cmd_name
+            if not dry_run:
+                cmd_path.write_text(
+                    _build_windows_cmd_shim(exe_target, python_exe, module_name),
+                    encoding="utf-8",
+                    newline="",
+                )
+                # Extensionless POSIX shim so Git Bash on Windows also supports bare `lethe`
+                sh_path.write_text(
+                    _build_posix_sh_shim(exe_target, python_exe, module_name),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            installed.append({"command": cmd_name, "path": str(cmd_path), "mode": "win_cmd_and_sh"})
+
+        path_updated = _ensure_windows_user_path(target_bin) if (update_path and not dry_run) else False
+        on_path = path_updated or _is_dir_on_path(target_bin)
+    else:
+        for cmd_name, module_name in commands:
+            source_bin = scripts_dir / cmd_name
+            dest_path = target_bin / cmd_name
+            same_location = (
+                source_bin.exists()
+                and source_bin.parent.resolve() == target_bin.resolve()
+            )
+            if same_location:
+                installed.append({"command": cmd_name, "path": str(dest_path), "mode": "already_in_bin"})
+                continue
+
+            if not dry_run:
+                if dest_path.exists() or dest_path.is_symlink():
+                    dest_path.unlink()
+                if source_bin.exists():
+                    dest_path.symlink_to(source_bin)
+                    mode = "symlink"
+                else:
+                    dest_path.write_text(
+                        _build_posix_sh_shim(None, python_exe, module_name),
+                        encoding="utf-8",
+                    )
+                    dest_path.chmod(0o755)
+                    mode = "sh_wrapper"
+            else:
+                mode = "symlink" if source_bin.exists() else "sh_wrapper"
+
+            installed.append({"command": cmd_name, "path": str(dest_path), "mode": mode})
+
+        path_updated = False
+        on_path = _is_dir_on_path(target_bin)
+
+    return {
+        "platform": sys.platform,
+        "bin_dir": str(target_bin),
+        "python_executable": python_exe,
+        "installed": installed,
+        "path_updated": path_updated,
+        "on_path": on_path,
+        "dry_run": dry_run,
+    }
+
 
 

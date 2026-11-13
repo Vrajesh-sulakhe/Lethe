@@ -104,20 +104,26 @@ Lethe acts as an **Intelligent Memory Operating System** between your AI agent a
 ## Quickstart & Installation
 
 ### Option A: Global CLI Install (Recommended — Mac, Linux & Windows)
-Install `lethe` globally so `lethe`, `lethe setup`, `lethe creds`, and `lethe mcp` work from any folder with one universal vault (`~/.lethe/lethe.db` and `~/.lethe/procedures`):
+Install `lethe` globally so typing `lethe` anywhere prints the menu and `lethe setup`, `lethe creds`, and `lethe mcp` share one universal vault (`~/.lethe/lethe.db` and `~/.lethe/procedures`):
 
-```bash
-# macOS / Linux / Windows (with uv)
-uv tool install git+https://github.com/vrajeshsulakhe/Lethe.git
-
-# Or with pip (if not using uv):
-pip install --user git+https://github.com/vrajeshsulakhe/Lethe.git
+**Windows (One-Step PowerShell Install — works with plain Python, no `uv` required):**
+```powershell
+irm https://raw.githubusercontent.com/Vrajesh-sulakhe/Lethe/main/install.ps1 | iex
+```
+Or if you already cloned the repo:
+```powershell
+.\install.bat
 ```
 
-> **Windows PATH note:** If `lethe` is not recognized right after `uv tool install`, run `uv tool update-shell` and open a new PowerShell/CMD window. If installed with `pip install --user`, ensure Python's user `Scripts` folder is on `PATH` (or invoke `py -m lethe.cli ...`).
-
-Then wire your tools or print copy-pasteable MCP credentials:
+**macOS / Linux / Windows (with `uv`):**
 ```bash
+uv tool install git+https://github.com/Vrajesh-sulakhe/Lethe.git
+```
+*(Or inside a local `.venv`, run `python -m lethe.cli install-cli` to register `lethe` & `lethe-mcp` into `~/.local/bin` and add it to Windows User `PATH`.)*
+
+Then run from any terminal folder:
+```bash
+lethe                # Show the full Lethe CLI menu
 lethe setup          # Auto-wire Cursor, Claude Code, Antigravity, Codex
 lethe creds          # Print JSON / TOML / 1-line CLI credentials
 lethe health         # Verify ~/.lethe/lethe.db WAL health

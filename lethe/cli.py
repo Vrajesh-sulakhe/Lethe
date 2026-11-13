@@ -12,6 +12,7 @@ from lethe.platform.setup import (
     format_mcp_credentials,
     get_default_db_path,
     get_default_procedures_dir,
+    install_global_cli,
 )
 
 
@@ -281,6 +282,40 @@ def cmd_creds(args):
     )
 
 
+def cmd_install_cli(args):
+    res = install_global_cli(
+        bin_dir=getattr(args, "bin_dir", None),
+        update_path=not getattr(args, "no_path", False),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+        return
+
+    print("=" * 80)
+    print(" LETHE GLOBAL CLI INSTALLER")
+    print("=" * 80)
+    print(f" Target Bin Dir: {res['bin_dir']}")
+    print(f" Python Runtime: {res['python_executable']}")
+    for item in res["installed"]:
+        print(f" [OK] {item['command']:<10} -> {item['path']} ({item['mode']})")
+    if res["platform"] == "win32":
+        if res["path_updated"]:
+            print(f"\n [OK] Added {res['bin_dir']} to Windows User PATH.")
+            print(" Open a new PowerShell or CMD window and run 'lethe' to open the menu.")
+        elif res["on_path"]:
+            print("\n [OK] Target bin directory is already on PATH. Run 'lethe' anywhere.")
+        else:
+            print(f"\n Add {res['bin_dir']} to your Windows PATH to run 'lethe' from any folder.")
+    else:
+        if not res["on_path"]:
+            print(f"\n Add this line to your shell profile (~/.zshrc or ~/.bashrc):")
+            print(f'   export PATH="{res["bin_dir"]}:$PATH"')
+        else:
+            print("\n [OK] Target bin directory is already on PATH. Run 'lethe' anywhere.")
+    print("=" * 80)
+
+
 def cmd_mcp(args):
     from lethe.mcp.server import run_mcp_server
 
@@ -457,6 +492,13 @@ def main():
     p_ui.add_argument("--port", type=int, default=8765, help="Dashboard port")
     p_ui.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
 
+    # install-cli command
+    p_inst = subparsers.add_parser("install-cli", help="Install global 'lethe' and 'lethe-mcp' CLI commands on PATH (Mac/Linux/Windows)")
+    p_inst.add_argument("--bin-dir", default=None, help="Target bin directory (default: ~/.local/bin)")
+    p_inst.add_argument("--no-path", action="store_true", help="Do not modify Windows User PATH")
+    p_inst.add_argument("--dry-run", action="store_true", help="Inspect installation plan without writing files")
+    p_inst.add_argument("--json", action="store_true", help="Output result as JSON")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -473,6 +515,7 @@ def main():
         "benchmark": cmd_benchmark,
         "setup": cmd_setup,
         "ui": cmd_ui,
+        "install-cli": cmd_install_cli,
     }
     handler = dispatch.get(args.subcommand)
     if handler:
