@@ -741,6 +741,98 @@ class LetheMemory:
     def rollback(self, target: str, branch: Optional[str] = None) -> MemoryCommit:
         return self.git.rollback(target=target, branch=branch)
 
+    # --- Reactive Cross-Tool Sync Engine ---
+
+    @staticmethod
+    def format_sync_delta(
+        branch: str,
+        events: List[Dict[str, Any]],
+        active_handover: Optional[HandoverPacket],
+        max_tokens: int = 300,
+    ) -> str:
+        if max_tokens <= 0 or not events:
+            return ""
+
+        lines: List[str] = [f"[Lethe Sync | branch={branch} | updates={len(events)}]"]
+        if active_handover:
+            lines.append(f"- Active Handover ({active_handover.task_id}): {active_handover.task_goal}")
+
+        # Show newest events first so recent state fits tight prompt hook budgets
+        for ev in reversed(events):
+            etype = ev.get("event_type", "EVENT")
+            details = ev.get("details") or {}
+            summary = (
+                details.get("summary")
+                or details.get("task_goal")
+                or details.get("message")
+                or details.get("branch")
+                or ev.get("target_id")
+                or ""
+            )
+            line = f"- {etype}: {summary}".strip()
+            candidate = "\n".join(lines + [line])
+            if count_tokens(candidate) <= max_tokens:
+                lines.append(line)
+            else:
+                break
+
+        text = "\n".join(lines)
+        while text and count_tokens(text) > max_tokens:
+            if len(lines) > 1:
+                lines.pop()
+                text = "\n".join(lines)
+            else:
+                text = truncate_to_tokens(lines[0], max_tokens, suffix="...")
+                break
+        return text
+
+    def get_sync_delta(
+        self,
+        client_id: str,
+        max_tokens: int = 300,
+        peek: bool = False,
+    ) -> SyncDelta:
+        active_branch = self.current_branch
+        cursor = self.db.get_sync_cursor(client_id)
+        last_id = int(cursor.get("last_audit_id", 0))
+        events = self.db.get_audit_events_since(last_id, limit=50)
+        latest_id = self.db.get_max_audit_id()
+
+        if not events:
+            return SyncDelta(
+                client_id=client_id,
+                branch=active_branch,
+                last_audit_id=last_id,
+                latest_audit_id=latest_id,
+                events=[],
+                active_handover=None,
+                token_count=0,
+                formatted_text="",
+            )
+
+        active_hp = self.db.get_latest_handover_packet(branch=active_branch)
+        formatted = self.format_sync_delta(
+            branch=active_branch,
+            events=events,
+            active_handover=active_hp,
+            max_tokens=max_tokens,
+        )
+        tokens = count_tokens(formatted) if formatted else 0
+
+        if not peek:
+            self.db.update_sync_cursor(client_id, last_audit_id=latest_id, branch=active_branch)
+
+        return SyncDelta(
+            client_id=client_id,
+            branch=active_branch,
+            last_audit_id=last_id,
+            latest_audit_id=latest_id,
+            events=events,
+            active_handover=active_hp,
+            token_count=tokens,
+            formatted_text=formatted,
+        )
+
     def check_health(self) -> Dict[str, Any]:
         """
         Checks the health of the database, WAL journal mode, schema version,
