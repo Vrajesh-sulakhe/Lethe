@@ -473,6 +473,40 @@ def cmd_consolidate(args):
     )
 
 
+def cmd_ledger(args):
+    with _open_memory(args) as memory:
+        if getattr(args, "verify", False):
+            valid, reason = memory.ledger.verify_chain()
+            count = memory.ledger.count_blocks()
+            print("=" * 80)
+            print(" LETHE CRYPTOGRAPHIC LEDGER VERIFICATION")
+            print("=" * 80)
+            print(f" Total Immutable Blocks: {count}")
+            print(f" Cryptographic Status:  {'VALID (Unbroken Hash Chain)' if valid else 'CORRUPT'}")
+            if not valid:
+                print(f" Error Detail:          {reason}")
+            print("=" * 80)
+            if not valid:
+                sys.exit(1)
+            return
+
+        blocks = memory.ledger.list_blocks(limit=args.limit)
+        print("=" * 80)
+        print(f" LETHE APPEND-ONLY CRYPTOGRAPHIC LEDGER - Showing {len(blocks)} Blocks")
+        print("=" * 80)
+        if not blocks:
+            print(" [No ledger transactions recorded yet.]")
+            return
+        for b in blocks:
+            print(f" Block #{b.sequence:04d} | Action: {b.action:10} | Node: #{b.node_id[:8]} | Time: {b.timestamp}")
+            print(f"   Prev Hash:    {b.prev_hash[:20]}...{b.prev_hash[-12:]}")
+            print(f"   Block Hash:   {b.block_hash[:20]}...{b.block_hash[-12:]}")
+            print(f"   Payload Hash: {b.payload_hash[:20]}...{b.payload_hash[-12:]}")
+            if b.metadata:
+                print(f"   Metadata:     {b.metadata}")
+            print("-" * 80)
+
+
 def _configure_console_encoding() -> None:
     """Ensures stdout/stderr never raise UnicodeEncodeError on Windows cp1252/cp437 consoles."""
     for stream in (sys.stdout, sys.stderr):
@@ -628,6 +662,11 @@ def main():
     p_cons.add_argument("--workspace", default=None, help="Workspace ID")
     p_cons.add_argument("--scope", default="project", choices=["project", "global"], help="Scope")
 
+    # ledger command
+    p_ledger = subparsers.add_parser("ledger", parents=[common], help="Inspect or verify the append-only cryptographic redaction ledger")
+    p_ledger.add_argument("--verify", action="store_true", help="Mathematically verify unbroken cryptographic hash chain")
+    p_ledger.add_argument("--limit", type=int, default=20, help="Number of recent blocks to display")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -649,6 +688,7 @@ def main():
         "untrust": cmd_untrust,
         "dream": cmd_dream,
         "consolidate": cmd_consolidate,
+        "ledger": cmd_ledger,
     }
     handler = dispatch.get(args.subcommand)
     if handler:

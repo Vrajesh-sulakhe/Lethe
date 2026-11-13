@@ -20,6 +20,7 @@ from lethe.core.drift import (
 from lethe.core.synthesis import MemorySynthesizer
 from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
+from lethe.storage.ledger import CryptographicLedger
 from lethe.storage.lineage import LineageManager
 from lethe.storage.tiers import RelationalTier, SemanticTier, ProceduralTier, EmbeddingHelper
 from lethe.core.bitemporal import BitemporalManager
@@ -56,7 +57,8 @@ class LetheMemory:
                 sec_path = p.parent / "trusted_workspaces.json"
 
         self.security = WorkspaceSecurityManager(config_path=sec_path, default_trust=default_trust)
-        self.lineage = LineageManager(self.db)
+        self.ledger = CryptographicLedger(self.db)
+        self.lineage = LineageManager(self.db, ledger=self.ledger)
         self.relational = RelationalTier(self.db)
         self.semantic = SemanticTier(self.db)
         self.procedural = ProceduralTier(procedures_dir)
@@ -172,6 +174,12 @@ class LetheMemory:
         # 4. Record Lineage DAG parent links
         for pid in node.parent_ids:
             self.lineage.add_lineage_edge(pid, node.id)
+
+        # 5. Record state transition in append-only cryptographic ledger
+        try:
+            self.ledger.record_store(node)
+        except Exception:
+            pass
 
         return node
 

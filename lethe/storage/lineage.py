@@ -1,6 +1,6 @@
 import hashlib
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from lethe.models import MemoryStatus, DeletionReceipt
 from lethe.storage.db import DatabaseManager
 
@@ -10,8 +10,9 @@ class LineageManager:
     Guarantees cascading invalidation of derived summaries, vector embeddings,
     and downstream inferences when a root fact is deleted.
     """
-    def __init__(self, db: DatabaseManager):
+    def __init__(self, db: DatabaseManager, ledger: Optional[Any] = None):
         self.db = db
+        self.ledger = ledger
 
     def add_lineage_edge(self, parent_id: str, child_id: str, relation_type: str = "derived_from") -> None:
         cursor = self.db.conn.cursor()
@@ -84,6 +85,18 @@ class LineageManager:
         sorted_ids_str = ",".join(sorted(all_purged_ids))
         hash_payload = f"{target_id}:{sorted_ids_str}:{timestamp}:{reason}"
         verification_hash = hashlib.sha256(hash_payload.encode("utf-8")).hexdigest()
+
+        # 4. Record cryptographic redaction in tamper-evident ledger (salt shredding)
+        if self.ledger:
+            for node_id in all_purged_ids:
+                try:
+                    self.ledger.record_tombstone(
+                        node_id=node_id,
+                        receipt_hash=verification_hash,
+                        reason=reason,
+                    )
+                except Exception:
+                    pass
 
         return DeletionReceipt(
             target_id=target_id,

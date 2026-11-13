@@ -134,3 +134,4 @@ class MemorySynthesizer:
             clusters.append(current_cluster)
 
         return [[nodes[idx] for idx in cl] for cl in clusters]
+

@@ -212,3 +212,4 @@ def test_cli_dream_and_consolidate():
             workspace=None,
             scope="project",
         ))
+

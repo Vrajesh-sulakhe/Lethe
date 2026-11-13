@@ -412,6 +412,19 @@ def create_mcp_server(
             "parents_marked_historical": mark_parents_historical,
         }, indent=2)
 
+    @server.tool()
+    def lethe_verify_ledger() -> str:
+        """Mathematically verify the append-only cryptographic ledger and salt-shredding integrity."""
+        with memory.db._lock:
+            valid, reason = memory.ledger.verify_chain()
+            count = memory.ledger.count_blocks()
+        return json.dumps({
+            "ledger_valid": valid,
+            "total_blocks": count,
+            "verification_error": reason,
+            "cryptographic_proof": "MERKLE_CHAIN_VALID" if valid else "MERKLE_CHAIN_CORRUPT",
+        }, indent=2)
+
     return server
 
 

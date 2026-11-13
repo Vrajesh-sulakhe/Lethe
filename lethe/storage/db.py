@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from lethe.models import MemoryNode, MemoryStatus, StorageTier, HandoverPacket, CodeAnchor
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def get_current_workspace_id(start_path: Path | str = ".") -> str:
@@ -133,6 +133,30 @@ class DatabaseManager:
                 event_type TEXT NOT NULL,
                 target_id TEXT,
                 details_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            );
+        """)
+
+        # Append-only cryptographic state-transition ledger
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_blocks (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                prev_hash TEXT NOT NULL,
+                block_hash TEXT NOT NULL,
+                action TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_node_id ON ledger_blocks(node_id);")
+
+        # Cryptographic per-node salts table (shredded on cascading purge)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_salts (
+                node_id TEXT PRIMARY KEY,
+                salt TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
         """)
