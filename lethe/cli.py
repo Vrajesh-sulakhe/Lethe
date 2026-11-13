@@ -507,6 +507,85 @@ def cmd_ledger(args):
             print("-" * 80)
 
 
+def cmd_doctor(args):
+    from lethe.eval.doctor import LetheDoctor
+
+    with _open_memory(args) as memory:
+        doc = LetheDoctor(memory)
+        res = doc.run_all_checks()
+
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        status_label = "HEALTHY" if res["healthy"] else "ATTENTION NEEDED"
+        print("=" * 80)
+        print(f" LETHE ENTERPRISE SYSTEM DIAGNOSTICS (DOCTOR) - Status: {status_label}")
+        print("=" * 80)
+        db = res["checks"]["database"]
+        print(f" SQLite Storage:         [{db['status']}] WAL Mode: {db['journal_mode'].upper()}, Schema: v{db['schema_version']}, Integrity: {db['integrity'].upper()}")
+
+        ledger = res["checks"]["ledger"]
+        print(f" Cryptographic Ledger:   [{ledger['status']}] Total Blocks: {ledger['total_blocks']}")
+
+        tomb = res["checks"]["tombstones"]
+        leak_msg = f"{tomb['tombstone_count']} Tombstones audited ({tomb['content_leaks']} content, {tomb['vector_leaks']} vector, {tomb['salt_leaks']} salt leaks)"
+        print(f" Zero-Leakage Redaction: [{tomb['status']}] {leak_msg}")
+
+        conf = res["checks"]["conflicts"]
+        print(f" Conflict Invariants:    [{conf['status']}] {conf['count']} unresolved contradictions")
+
+        drift = res["checks"]["code_drift"]
+        print(f" Decision-to-Code Drift: [{drift['status']}] {drift['total_anchors']} Anchors checked ({drift['drifted_count']} drifted)")
+        if drift["drifted_memories"]:
+            for d in drift["drifted_memories"]:
+                print(f"   [!] #{d['id'][:6]} ({d['file_path']}): {d['reason']}")
+
+        sec = res["checks"]["security"]
+        print(f" Workspace Security:     [{sec['status']}] {sec['trusted_count']} Trusted, {sec['untrusted_count']} Untrusted Workspaces")
+
+        mcp_res = res["checks"].get("mcp_tools", {})
+        if mcp_res.get("status") == "PASS":
+            tools_list = ", ".join(mcp_res.get("connected_tools", [])) or "None yet"
+            print(f" MCP Platform Wiring:    [PASS] {mcp_res['connected_count']}/{mcp_res['detected_count']} tools connected ({tools_list})")
+
+        print("=" * 80)
+        if res["issues"]:
+            print(" Diagnostic Warnings / Issues:")
+            for issue in res["issues"]:
+                print(f"  - {issue}")
+            print("=" * 80)
+
+    if getattr(args, "strict", False) and not res["healthy"]:
+        sys.exit(1)
+
+
+def cmd_lint(args):
+    from lethe.eval.doctor import LetheDoctor
+
+    with _open_memory(args) as memory:
+        doc = LetheDoctor(memory)
+        res = doc.run_lint()
+
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        print("=" * 80)
+        print(f" LETHE MEMORY LINTER - Status: {'CLEAN' if res['clean'] else 'WARNINGS DETECTED'}")
+        print("=" * 80)
+        print(f" Total Memories Audited: {res['total_memories']}")
+        print(f" Duplicate Memories:     {res['duplicates']}")
+        print(f" Code-Drifted Memories:  {res['drifted']}")
+        print(f" Unresolved Conflicts:   {res['conflicts']}")
+        print("=" * 80)
+        if res["warnings"]:
+            for w in res["warnings"]:
+                print(f"  [WARN] {w}")
+            print("=" * 80)
+
+    if getattr(args, "strict", False) and not res["clean"]:
+        sys.exit(1)
+
+
 def _configure_console_encoding() -> None:
     """Ensures stdout/stderr never raise UnicodeEncodeError on Windows cp1252/cp437 consoles."""
     for stream in (sys.stdout, sys.stderr):
@@ -667,6 +746,16 @@ def main():
     p_ledger.add_argument("--verify", action="store_true", help="Mathematically verify unbroken cryptographic hash chain")
     p_ledger.add_argument("--limit", type=int, default=20, help="Number of recent blocks to display")
 
+    # doctor command
+    p_doc = subparsers.add_parser("doctor", parents=[common], help="Run enterprise system diagnostics across WAL, ledger, drift, and security")
+    p_doc.add_argument("--strict", action="store_true", help="Exit with non-zero status if any warning or failure exists")
+    p_doc.add_argument("--json", action="store_true", help="Output diagnostic report as structured JSON for CI/CD")
+
+    # lint command
+    p_lint = subparsers.add_parser("lint", parents=[common], help="Lint memory vault for duplicate memories, drift, and unresolved conflicts")
+    p_lint.add_argument("--strict", action="store_true", help="Exit with non-zero status if any lint warning exists")
+    p_lint.add_argument("--json", action="store_true", help="Output lint report as structured JSON")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -689,6 +778,8 @@ def main():
         "dream": cmd_dream,
         "consolidate": cmd_consolidate,
         "ledger": cmd_ledger,
+        "doctor": cmd_doctor,
+        "lint": cmd_lint,
     }
     handler = dispatch.get(args.subcommand)
     if handler:

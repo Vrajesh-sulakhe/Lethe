@@ -276,3 +276,4 @@ class CryptographicLedger:
             cursor.execute("SELECT COUNT(*) FROM ledger_blocks")
             row = cursor.fetchone()
             return int(row[0]) if row else 0
+
