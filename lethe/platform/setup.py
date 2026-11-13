@@ -87,7 +87,7 @@ def generate_mcp_config(
     db = get_default_db_path(db_path)
     wrapper = get_wrapper_script_path() if use_wrapper else None
     global_cli: Optional[str] = None
-    if not python_path and not wrapper:
+    if not python_path and not wrapper and sys.platform != "win32":
         global_cli = (lethe_cmd or None) if lethe_cmd is not None else get_default_lethe_executable()
 
     if python_path:
@@ -352,6 +352,15 @@ def _merge_toml_mcp_server(
     return updated
 
 
+def _safe_exists(p: Optional[Path]) -> bool:
+    if p is None:
+        return False
+    try:
+        return p.exists()
+    except (OSError, PermissionError):
+        return False
+
+
 def detect_installed_tools(
     workspace_dir: Optional[Path] = None,
     home_dir: Optional[Path] = None,
@@ -377,21 +386,24 @@ def detect_installed_tools(
 
         # Prefer an explicit workspace tool directory (e.g. <ws>/.cursor/) if present
         for p in paths:
-            resolved_parent = p.parent.resolve()
-            if (
-                resolved_parent != ws
-                and resolved_parent != home
-                and ws in p.resolve().parents
-                and p.parent.exists()
-            ):
-                found_path = p
-                if p.exists():
-                    is_configured = _is_lethe_configured(p)
-                break
+            try:
+                resolved_parent = p.parent.resolve()
+                if (
+                    resolved_parent != ws
+                    and resolved_parent != home
+                    and ws in p.resolve().parents
+                    and _safe_exists(p.parent)
+                ):
+                    found_path = p
+                    if _safe_exists(p):
+                        is_configured = _is_lethe_configured(p)
+                    break
+            except (OSError, PermissionError):
+                continue
 
         # Next check for existing config files in priority order (preferring already-configured files)
         if not found_path:
-            existing_paths = [p for p in paths if p.exists()]
+            existing_paths = [p for p in paths if _safe_exists(p)]
             for p in existing_paths:
                 if _is_lethe_configured(p):
                     found_path = p
@@ -403,7 +415,7 @@ def detect_installed_tools(
         # If file doesn't exist yet, pick the first valid parent directory or default path
         if not found_path:
             for p in paths:
-                if p.parent.exists():
+                if _safe_exists(p.parent):
                     found_path = p
                     break
             if not found_path and paths:
@@ -412,7 +424,7 @@ def detect_installed_tools(
         results[tool_name] = {
             "name": tool_name,
             "path": found_path,
-            "exists": found_path.exists() if found_path else False,
+            "exists": _safe_exists(found_path),
             "is_configured": is_configured,
         }
 
