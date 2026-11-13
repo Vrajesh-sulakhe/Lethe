@@ -95,3 +95,63 @@ async def test_mcp_resources_tools_and_cross_process_subscription_bus(tmp_path):
         unsub()
         mem_a.close()
         server._lethe_memory.close()
+
+
+def test_cli_branch_rollback_and_hook_inject(tmp_path, monkeypatch):
+    from lethe.cli import main as cli_main
+
+    db_path = tmp_path / "cli_sync.db"
+    procs_dir = tmp_path / "procs"
+    base_args = ["--db", str(db_path), "--procedures-dir", str(procs_dir)]
+
+    # Store, commit, create branch, and switch via CLI
+    assert cli_main([*base_args, "store", "Initial CLI architecture choice"]) == 0
+    assert cli_main([*base_args, "commit", "-m", "v1"]) == 0
+    assert cli_main([*base_args, "branch", "create", "feat-hook", "--switch"]) == 0
+    assert cli_main([*base_args, "branch", "list"]) == 0
+    assert cli_main([*base_args, "store", "Temporary experiment fact"]) == 0
+    assert cli_main([*base_args, "rollback", "HEAD~0"]) == 0
+
+    # hook inject emits delta on first call, then empty on immediate repeat
+    buf1 = io.StringIO()
+    with redirect_stdout(buf1):
+        rc = cli_main([*base_args, "hook", "inject", "--client", "claude", "--max-tokens", "200"])
+    assert rc == 0
+    assert "Lethe Sync" in buf1.getvalue()
+
+    buf2 = io.StringIO()
+    with redirect_stdout(buf2):
+        rc2 = cli_main([*base_args, "hook", "inject", "--client", "claude", "--max-tokens", "200"])
+    assert rc2 == 0
+    assert buf2.getvalue().strip() == ""
+
+
+def test_install_client_hooks_idempotent_with_backup(tmp_path):
+    from lethe.platform.setup import install_claude_hooks, install_cursor_sync_rule
+
+    claude_settings = tmp_path / ".claude" / "settings.json"
+    claude_settings.parent.mkdir(parents=True)
+    claude_settings.write_text(json.dumps({"existingKey": True}), encoding="utf-8")
+
+    res1 = install_claude_hooks(settings_path=claude_settings)
+    assert res1["status"] == "configured"
+    assert (tmp_path / ".claude" / "settings.json.bak").exists()
+    data = json.loads(claude_settings.read_text(encoding="utf-8"))
+    assert data["existingKey"] is True
+    assert "UserPromptSubmit" in data["hooks"]
+    assert "SessionStart" in data["hooks"]
+
+    # Second run is idempotent (no duplicate hook entries)
+    res2 = install_claude_hooks(settings_path=claude_settings)
+    assert res2["status"] == "already_configured"
+    data2 = json.loads(claude_settings.read_text(encoding="utf-8"))
+    assert len(data2["hooks"]["UserPromptSubmit"]) == 1
+    assert len(data2["hooks"]["SessionStart"]) == 1
+
+    # Cursor sync rule is idempotent too
+    cursor_dir = tmp_path / ".cursor"
+    cur1 = install_cursor_sync_rule(cursor_dir=cursor_dir)
+    assert cur1["status"] == "configured"
+    assert (cursor_dir / "rules" / "lethe-sync.mdc").exists()
+    cur2 = install_cursor_sync_rule(cursor_dir=cursor_dir)
+    assert cur2["status"] == "already_configured"

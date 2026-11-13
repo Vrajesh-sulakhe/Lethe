@@ -4,7 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from lethe.core.engine import LetheMemory
 from lethe.models import MemoryStatus, StorageTier
 from lethe.platform.setup import (
@@ -42,6 +42,7 @@ def cmd_inspect(args):
             status=target_status,
             workspace_id=getattr(args, "workspace", None),
             tier=target_tier,
+            branch=memory.current_branch,
         )
     print("=" * 80)
     print(f" LETHE MEMORY INSPECTOR - Total Records: {len(memories)}")
@@ -259,6 +260,7 @@ def cmd_setup(args):
         db_path=resolved_db,
         procedures_dir=resolved_procs,
         use_wrapper=use_wrapper,
+        with_hooks=getattr(args, "with_hooks", False),
     )
 
     print(f"\nSuccessfully configured {len(results)} tool integrations (shared vault: {resolved_db}):\n")
@@ -586,6 +588,102 @@ def cmd_lint(args):
         sys.exit(1)
 
 
+def cmd_branch(args):
+    action = getattr(args, "branch_action", None) or "list"
+    with _open_memory(args) as memory:
+        if action == "list":
+            active = memory.current_branch
+            branches = memory.list_branches()
+            if getattr(args, "json", False):
+                print(json.dumps({
+                    "active_branch": active,
+                    "branches": [b.model_dump() for b in branches],
+                }, indent=2))
+                return
+            print("=" * 80)
+            print(" LETHE MEMORY GIT - BRANCHES")
+            print("=" * 80)
+            for b in branches:
+                marker = "*" if b.name == active else " "
+                head = b.head_commit_id or "-"
+                print(f" {marker} {b.name:<24} | head={head:<12} | parent={b.parent_branch or '-'}")
+            print("=" * 80)
+            return
+
+        if action == "create":
+            info = memory.create_branch(
+                name=args.name,
+                from_branch=getattr(args, "from_branch", None),
+                switch=getattr(args, "switch", False),
+            )
+            print(json.dumps({"action": "BRANCH_CREATED", "branch": info.model_dump()}, indent=2))
+            return
+
+        if action in ("switch", "checkout"):
+            info = memory.switch_branch(args.name)
+            print(json.dumps({"action": "BRANCH_SWITCHED", "branch": info.model_dump()}, indent=2))
+            return
+
+        if action == "diff":
+            diff = memory.diff_branches(source=args.source, target=args.target)
+            print(json.dumps(diff, indent=2))
+            return
+
+        if action == "merge":
+            res = memory.merge_branch(
+                source=args.source,
+                target=getattr(args, "target", None),
+                strategy=args.strategy,
+            )
+            print(json.dumps(res.model_dump(), indent=2))
+            return
+
+        if action == "delete":
+            memory.delete_branch(args.name)
+            print(json.dumps({"action": "BRANCH_DELETED", "name": args.name}, indent=2))
+            return
+
+
+def cmd_commit(args):
+    with _open_memory(args) as memory:
+        commit = memory.commit(message=args.message)
+    print(json.dumps({
+        "action": "MEMORY_COMMITTED",
+        "id": commit.id,
+        "branch": commit.branch,
+        "message": commit.message,
+        "created_at": commit.created_at,
+    }, indent=2))
+
+
+def cmd_rollback(args):
+    with _open_memory(args) as memory:
+        commit = memory.rollback(target=args.target)
+    print(json.dumps({
+        "action": "MEMORY_ROLLED_BACK",
+        "target": args.target,
+        "new_head": commit.id,
+        "branch": commit.branch,
+        "message": commit.message,
+    }, indent=2))
+
+
+def cmd_hook(args):
+    if getattr(args, "hook_action", None) == "inject":
+        with _open_memory(args) as memory:
+            delta = memory.get_sync_delta(
+                client_id=args.client,
+                max_tokens=args.max_tokens,
+                peek=getattr(args, "peek", False),
+            )
+        if getattr(args, "json", False):
+            print(json.dumps(delta.model_dump(), indent=2))
+            return
+        if delta.formatted_text:
+            print(delta.formatted_text)
+        return
+
+
 def _configure_console_encoding() -> None:
     """Ensures stdout/stderr never raise UnicodeEncodeError on Windows cp1252/cp437 consoles."""
     for stream in (sys.stdout, sys.stderr):
@@ -597,7 +695,7 @@ def _configure_console_encoding() -> None:
                 pass
 
 
-def main():
+def main(argv: Optional[List[str]] = None) -> int:
     _configure_console_encoding()
     parser = argparse.ArgumentParser(
         prog="lethe",
@@ -702,6 +800,7 @@ def main():
     p_setup.add_argument("--print", dest="print_creds", action="store_true", help="Print copy-pasteable MCP credentials without modifying files")
     p_setup.add_argument("--tool", default="all", choices=["all", "cursor", "claude", "antigravity", "codex", "vscode"], help="Target specific tool")
     p_setup.add_argument("--use-wrapper", action="store_true", help="Wire tools using lethe.sh / lethe.cmd wrapper instead of direct CLI/Python path")
+    p_setup.add_argument("--with-hooks", action="store_true", help="Also install optional Claude Code / Cursor reactive sync hooks and rules")
 
     # ui command
     p_ui = subparsers.add_parser("ui", parents=[common], help="Launch the Lethe real-time developer dashboard")
@@ -756,7 +855,48 @@ def main():
     p_lint.add_argument("--strict", action="store_true", help="Exit with non-zero status if any lint warning exists")
     p_lint.add_argument("--json", action="store_true", help="Output lint report as structured JSON")
 
-    args = parser.parse_args()
+    # branch command (Memory Git)
+    p_branch = subparsers.add_parser("branch", parents=[common], help="Manage Memory Git branches (list, create, switch, diff, merge, delete)")
+    p_branch.add_argument("--json", action="store_true", help="Output branch listing as JSON")
+    branch_sub = p_branch.add_subparsers(dest="branch_action")
+    p_br_list = branch_sub.add_parser("list", parents=[common], help="List all memory branches")
+    p_br_list.add_argument("--json", action="store_true", help="Output branch listing as JSON")
+    p_br_create = branch_sub.add_parser("create", parents=[common], help="Create a new memory branch")
+    p_br_create.add_argument("name", help="Branch name")
+    p_br_create.add_argument("--from", dest="from_branch", default=None, help="Parent branch to fork from")
+    p_br_create.add_argument("--switch", action="store_true", help="Immediately switch to the new branch")
+    p_br_switch = branch_sub.add_parser("switch", parents=[common], help="Switch active memory branch")
+    p_br_switch.add_argument("name", help="Branch name")
+    p_br_checkout = branch_sub.add_parser("checkout", parents=[common], help="Alias for branch switch")
+    p_br_checkout.add_argument("name", help="Branch name")
+    p_br_diff = branch_sub.add_parser("diff", parents=[common], help="Diff two memory branches")
+    p_br_diff.add_argument("source", help="Source branch name")
+    p_br_diff.add_argument("target", nargs="?", default="main", help="Target branch name (default: main)")
+    p_br_merge = branch_sub.add_parser("merge", parents=[common], help="Merge source branch into target branch")
+    p_br_merge.add_argument("source", help="Source branch name")
+    p_br_merge.add_argument("--target", default=None, help="Target branch (default: active branch)")
+    p_br_merge.add_argument("--strategy", default="abort_on_conflict", choices=["abort_on_conflict", "ours", "theirs"], help="Conflict resolution strategy")
+    p_br_del = branch_sub.add_parser("delete", parents=[common], help="Delete a non-active, non-main branch")
+    p_br_del.add_argument("name", help="Branch name")
+
+    # commit command (Memory Git)
+    p_commit = subparsers.add_parser("commit", parents=[common], help="Create a snapshot commit on the active memory branch")
+    p_commit.add_argument("-m", "--message", required=True, help="Commit message")
+
+    # rollback command (Memory Git)
+    p_rollback = subparsers.add_parser("rollback", parents=[common], help="Roll back active branch to a commit ID or HEAD~N (preserves unlearning tombstones)")
+    p_rollback.add_argument("target", help="Target commit ID or relative step (e.g. HEAD~1)")
+
+    # hook command (Reactive Sync)
+    p_hook = subparsers.add_parser("hook", parents=[common], help="Client hook helpers for zero-prompt reactive sync")
+    hook_sub = p_hook.add_subparsers(dest="hook_action", required=True)
+    p_hook_inj = hook_sub.add_parser("inject", parents=[common], help="Print compact unread cross-tool delta for client prompt hooks")
+    p_hook_inj.add_argument("--client", required=True, help="Client cursor ID (e.g. claude, cursor, codex, antigravity)")
+    p_hook_inj.add_argument("--max-tokens", type=int, default=300, help="Strict BPE token limit for injected context")
+    p_hook_inj.add_argument("--peek", action="store_true", help="Inspect unread delta without advancing client cursor")
+    p_hook_inj.add_argument("--json", action="store_true", help="Output structured SyncDelta JSON")
+
+    args = parser.parse_args(argv)
 
     dispatch = {
         "mcp": cmd_mcp,
@@ -780,13 +920,18 @@ def main():
         "ledger": cmd_ledger,
         "doctor": cmd_doctor,
         "lint": cmd_lint,
+        "branch": cmd_branch,
+        "commit": cmd_commit,
+        "rollback": cmd_rollback,
+        "hook": cmd_hook,
     }
     handler = dispatch.get(args.subcommand)
     if handler:
         handler(args)
     else:
         parser.print_help()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

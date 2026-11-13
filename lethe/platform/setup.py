@@ -349,6 +349,7 @@ def setup_all_tools(
     dry_run: bool = False,
     workspace_dir: Optional[Path] = None,
     use_wrapper: bool = False,
+    with_hooks: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Discovers and configures all requested or detected tools.
@@ -376,6 +377,13 @@ def setup_all_tools(
             use_wrapper=use_wrapper,
         )
         outcomes.append(outcome)
+
+    if with_hooks:
+        if "claude" in target_tools:
+            outcomes.append(install_claude_hooks(db_path=db_path, procedures_dir=procedures_dir, dry_run=dry_run))
+        if "cursor" in target_tools:
+            cur_dir = (workspace_dir / ".cursor") if workspace_dir else (Path.home() / ".cursor")
+            outcomes.append(install_cursor_sync_rule(cursor_dir=cur_dir, dry_run=dry_run))
 
     return outcomes
 
@@ -648,6 +656,131 @@ def install_global_cli(
         "path_updated": path_updated,
         "on_path": on_path,
         "dry_run": dry_run,
+    }
+
+
+def _build_hook_inject_command(
+    client_id: str,
+    db_path: Optional[str] = None,
+    procedures_dir: Optional[str] = None,
+    max_tokens: int = 300,
+) -> str:
+    global_cli = get_default_lethe_executable()
+    parts: List[str] = (
+        [global_cli] if global_cli else [get_default_python_executable(), "-m", "lethe.cli"]
+    )
+    if db_path:
+        parts.extend(["--db", get_default_db_path(db_path)])
+    if procedures_dir:
+        parts.extend(["--procedures-dir", get_default_procedures_dir(procedures_dir)])
+    parts.extend(["hook", "inject", "--client", client_id, "--max-tokens", str(max_tokens)])
+    return _shell_join(parts)
+
+
+def install_claude_hooks(
+    settings_path: Optional[Path | str] = None,
+    db_path: Optional[str] = None,
+    procedures_dir: Optional[str] = None,
+    max_tokens: int = 300,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Idempotently installs Claude Code SessionStart & UserPromptSubmit hooks
+    for zero-prompt cross-tool memory injection, with .bak backup safety.
+    """
+    target = Path(settings_path) if settings_path else (Path.home() / ".claude" / "settings.json")
+    hook_cmd = _build_hook_inject_command(
+        client_id="claude",
+        db_path=db_path,
+        procedures_dir=procedures_dir,
+        max_tokens=max_tokens,
+    )
+
+    existing: Dict[str, Any] = {}
+    if target.exists():
+        try:
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+
+    hooks = existing.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        existing["hooks"] = hooks
+
+    changed = False
+    for event_name in ("SessionStart", "UserPromptSubmit"):
+        entries = hooks.get(event_name)
+        if not isinstance(entries, list):
+            entries = []
+            hooks[event_name] = entries
+
+        already_present = any(
+            isinstance(item, dict)
+            and any(
+                isinstance(h, dict) and "lethe" in str(h.get("command", "")) and "hook inject" in str(h.get("command", ""))
+                for h in item.get("hooks", [])
+            )
+            for item in entries
+        )
+        if not already_present:
+            entries.append({
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": hook_cmd}],
+            })
+            changed = True
+
+    if changed and not dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            backup = Path(f"{target}.bak")
+            backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "tool": "claude_hooks",
+        "path": str(target),
+        "status": ("dry_run" if dry_run else ("configured" if changed else "already_configured")),
+        "command": hook_cmd,
+    }
+
+
+def install_cursor_sync_rule(
+    cursor_dir: Optional[Path | str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Writes a lightweight Cursor workspace rule instructing Cursor to surface
+    Lethe's reactive MCP resources (lethe://sync/latest, lethe://handovers/active).
+    """
+    base_dir = Path(cursor_dir) if cursor_dir else (Path.home() / ".cursor")
+    rule_path = base_dir / "rules" / "lethe-sync.mdc"
+    desired = (
+        "---\n"
+        "description: Automatic cross-tool memory synchronization with Lethe MCP\n"
+        "alwaysApply: true\n"
+        "---\n\n"
+        "# Lethe Cross-Tool Reactive Sync\n\n"
+        "- When starting a task or after cross-tool switches (Claude Code / Antigravity / Codex), "
+        "read `lethe://sync/latest` and `lethe://handovers/active` to stay aligned on recent decisions.\n"
+        "- Store lasting architectural decisions via `lethe_store` and isolate risky experiments via `lethe_branch`.\n"
+    )
+
+    if rule_path.exists() and rule_path.read_text(encoding="utf-8") == desired:
+        status = "already_configured"
+    elif dry_run:
+        status = "dry_run"
+    else:
+        rule_path.parent.mkdir(parents=True, exist_ok=True)
+        rule_path.write_text(desired, encoding="utf-8")
+        status = "configured"
+
+    return {
+        "tool": "cursor_sync_rule",
+        "path": str(rule_path),
+        "status": status,
     }
 
 
