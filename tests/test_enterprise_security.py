@@ -223,3 +223,4 @@ def test_cli_trust_and_untrust():
             workspace_id=None,
             list=True,
         ))
+

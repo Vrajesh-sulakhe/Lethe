@@ -418,6 +418,61 @@ def cmd_untrust(args):
         print(f"Workspace '{args.workspace_id}' is now UNTRUSTED (isolated to private sandbox).")
 
 
+def cmd_dream(args):
+    with _open_memory(args, workspace_id=args.workspace) as memory:
+        clusters = memory.get_dream_candidates(
+            category=args.category,
+            workspace_id=args.workspace,
+            min_cluster_size=args.min_size,
+        )
+    print("=" * 80)
+    print(f" LETHE MEMORY SYNTHESIS (DREAMING) - Candidate Clusters: {len(clusters)}")
+    print("=" * 80)
+    if not clusters:
+        print(" [No memory clusters found meeting consolidation threshold.]")
+        return
+    for c in clusters:
+        print(f" Cluster [{c['cluster_id']}] | Category: {c['category']} | Size: {c['size']} memories")
+        print(f" Topic: {c['topic']}")
+        print(f" Parent IDs: {c['parent_ids']}")
+        for m in c["candidate_memories"][:3]:
+            print(f"   - [#{m['id'][:6]}] {m['content'][:70]}")
+        if len(c["candidate_memories"]) > 3:
+            print(f"   ... and {len(c['candidate_memories']) - 3} more")
+        print("-" * 80)
+
+
+def cmd_consolidate(args):
+    parent_ids = [p.strip() for p in args.parents.split(",") if p.strip()]
+    if not parent_ids:
+        print("Error: Specify at least one parent ID via --parents.", file=sys.stderr)
+        sys.exit(1)
+
+    with _open_memory(args, workspace_id=args.workspace) as memory:
+        node = memory.consolidate(
+            parent_ids=parent_ids,
+            summary_content=args.content,
+            category=args.category,
+            target_tier=StorageTier(args.tier),
+            mark_parents_historical=not args.keep_active,
+            workspace_id=args.workspace,
+            scope=args.scope,
+        )
+    print(
+        json.dumps(
+            {
+                "action": "CONSOLIDATED",
+                "id": node.id,
+                "category": node.category,
+                "tier": node.tier.value,
+                "parent_ids": node.parent_ids,
+                "parents_marked_historical": not args.keep_active,
+            },
+            indent=2,
+        )
+    )
+
+
 def _configure_console_encoding() -> None:
     """Ensures stdout/stderr never raise UnicodeEncodeError on Windows cp1252/cp437 consoles."""
     for stream in (sys.stdout, sys.stderr):
@@ -557,6 +612,22 @@ def main():
     p_untrust = subparsers.add_parser("untrust", parents=[common], help="Lock workspace into an untrusted isolated sandbox")
     p_untrust.add_argument("workspace_id", help="Workspace ID to untrust")
 
+    # dream command
+    p_dream = subparsers.add_parser("dream", parents=[common], help="Identify clusters of related atomic memories ripe for synthesis")
+    p_dream.add_argument("--category", default=None, help="Filter by memory category")
+    p_dream.add_argument("--workspace", default=None, help="Workspace filter")
+    p_dream.add_argument("--min-size", type=int, default=2, help="Minimum cluster size")
+
+    # consolidate command
+    p_cons = subparsers.add_parser("consolidate", parents=[common], help="Synthesize multiple memories into a single node with Lineage DAG tracking")
+    p_cons.add_argument("--parents", required=True, help="Comma-separated parent memory IDs")
+    p_cons.add_argument("--content", required=True, help="Synthesized summary content")
+    p_cons.add_argument("--category", default=None, help="Consolidated memory category")
+    p_cons.add_argument("--tier", default="semantic", choices=[t.value for t in StorageTier], help="Target storage tier")
+    p_cons.add_argument("--keep-active", action="store_true", help="Do not mark parent memories as HISTORICAL")
+    p_cons.add_argument("--workspace", default=None, help="Workspace ID")
+    p_cons.add_argument("--scope", default="project", choices=["project", "global"], help="Scope")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -576,6 +647,8 @@ def main():
         "install-cli": cmd_install_cli,
         "trust": cmd_trust,
         "untrust": cmd_untrust,
+        "dream": cmd_dream,
+        "consolidate": cmd_consolidate,
     }
     handler = dispatch.get(args.subcommand)
     if handler:

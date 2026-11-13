@@ -135,3 +135,4 @@ class WorkspaceSecurityManager:
                 return False, msg
 
         return True, None
+

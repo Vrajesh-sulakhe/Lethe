@@ -17,6 +17,7 @@ from lethe.core.drift import (
     compute_file_content_hash,
     get_git_commit_sha,
 )
+from lethe.core.synthesis import MemorySynthesizer
 from lethe.platform.security import WorkspaceSecurityManager
 from lethe.storage.db import DatabaseManager, get_current_workspace_id
 from lethe.storage.lineage import LineageManager
@@ -62,6 +63,7 @@ class LetheMemory:
         self.bitemporal = BitemporalManager(self.db)
         self.trust_gate = TrustGateManager(self.db)
         self.knapsack = KnapsackPacker()
+        self.synthesizer = MemorySynthesizer(self.db)
 
     def store(
         self,
@@ -567,6 +569,71 @@ class LetheMemory:
         Restores mid-task state for a secondary agent.
         """
         return self.db.get_handover_packet(task_id)
+
+    def get_dream_candidates(
+        self,
+        category: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        min_cluster_size: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Identifies clusters of related atomic memories across sessions ripe for consolidation."""
+        resolved_ws = workspace_id or self.workspace_id
+        return self.synthesizer.find_dream_candidates(
+            category=category,
+            workspace_id=resolved_ws,
+            min_cluster_size=min_cluster_size,
+        )
+
+    def consolidate(
+        self,
+        parent_ids: List[str],
+        summary_content: str,
+        category: Optional[str] = None,
+        target_tier: StorageTier = StorageTier.SEMANTIC,
+        mark_parents_historical: bool = True,
+        workspace_id: Optional[str] = None,
+        scope: str = "project",
+    ) -> MemoryNode:
+        """
+        Synthesizes multiple micro-memories into a single high-level node,
+        wiring all parent_ids into the Lineage DAG.
+        Optionally marks parents as HISTORICAL to conserve token budget while
+        preserving 100% cascading unlearning compliance.
+        """
+        valid_parents = []
+        inferred_category = category
+        for pid in parent_ids:
+            parent_node = self.db.get_memory(pid)
+            if parent_node and parent_node.status in (MemoryStatus.ACTIVE, MemoryStatus.HISTORICAL):
+                valid_parents.append(parent_node)
+                if not inferred_category:
+                    inferred_category = parent_node.category
+
+        if not valid_parents:
+            raise ValueError("No valid active or historical parent memories found for consolidation.")
+
+        target_category = inferred_category or "synthesized_summary"
+        resolved_workspace = workspace_id or self.workspace_id
+
+        # Store the synthesized summary node
+        summary_node = self.store(
+            content=summary_content,
+            category=target_category,
+            tier=target_tier,
+            source="agent_synthesis",
+            trust_level=0.8,
+            parent_ids=[p.id for p in valid_parents],
+            workspace_id=resolved_workspace,
+            scope=scope,
+        )
+
+        # Wire Lineage DAG edges and optionally mark parents historical
+        for p in valid_parents:
+            self.lineage.add_lineage_edge(p.id, summary_node.id)
+            if mark_parents_historical and p.status == MemoryStatus.ACTIVE:
+                self.db.update_memory_status(p.id, MemoryStatus.HISTORICAL, valid_to=summary_node.created_at)
+
+        return summary_node
 
     def check_health(self) -> Dict[str, Any]:
         """

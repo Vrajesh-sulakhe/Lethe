@@ -355,6 +355,63 @@ def create_mcp_server(
             "mode": "trusted" if is_trusted else "isolated_sandbox",
         }, indent=2)
 
+    @server.tool()
+    def lethe_dream_candidates(
+        category: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        min_cluster_size: int = 2,
+    ) -> str:
+        """Scan active memories for thematic clusters ripe for agent-driven synthesis ('dreaming')."""
+        with memory.db._lock:
+            clusters = memory.get_dream_candidates(
+                category=category,
+                workspace_id=workspace_id,
+                min_cluster_size=min_cluster_size,
+            )
+        return json.dumps({
+            "total_clusters": len(clusters),
+            "clusters": clusters,
+        }, indent=2)
+
+    @server.tool()
+    def lethe_consolidate(
+        parent_ids: List[str],
+        summary_content: str,
+        category: Optional[str] = None,
+        target_tier: str = "semantic",
+        mark_parents_historical: bool = True,
+        workspace_id: Optional[str] = None,
+        scope: str = "project",
+    ) -> str:
+        """
+        Synthesize multiple parent memories into a single high-level node with Lineage DAG tracking.
+        Guarantees cascading unlearning compliance if any root parent fact is later purged.
+        """
+        try:
+            tier_enum = StorageTier(target_tier.lower())
+        except ValueError:
+            tier_enum = StorageTier.SEMANTIC
+
+        with memory.db._lock:
+            node = memory.consolidate(
+                parent_ids=parent_ids,
+                summary_content=summary_content,
+                category=category,
+                target_tier=tier_enum,
+                mark_parents_historical=mark_parents_historical,
+                workspace_id=workspace_id,
+                scope=scope,
+            )
+        return json.dumps({
+            "status": "CONSOLIDATED",
+            "summary_node_id": node.id,
+            "parent_count": len(parent_ids),
+            "parent_ids": parent_ids,
+            "tier": node.tier.value,
+            "category": node.category,
+            "parents_marked_historical": mark_parents_historical,
+        }, indent=2)
+
     return server
 
 
