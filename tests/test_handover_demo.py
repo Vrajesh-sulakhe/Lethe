@@ -27,3 +27,4 @@ def test_cross_process_handover_persists_and_completes_task():
             assert len(packet.last_tool_trace) == 2
         finally:
             verifier.close()
+

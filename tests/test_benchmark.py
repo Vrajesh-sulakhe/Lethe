@@ -31,3 +31,4 @@ def test_full_30_session_benchmark_and_report_output():
         assert results["deletion_accuracy_pct"] == 100.0
         assert results["poisoning_defense_pct"] == 100.0
         assert results["queries_tested"] == 10
+

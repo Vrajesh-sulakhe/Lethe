@@ -32,3 +32,4 @@ def test_bemula_boolean_probe_detects_prefix_leak_before_purge():
         outcome = suite.test_boolean()
         assert outcome.startswith("FAIL")
         mem.close()
+

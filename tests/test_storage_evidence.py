@@ -29,3 +29,4 @@ def test_empirical_storage_evidence_experiments():
 
     for row in report["matrix"]:
         assert row["accuracy"] == "100.0%"
+
