@@ -1,4 +1,4 @@
-# Lethe: Autonomous Agent Memory Layer
+# Lethe: Autonomous Agent Memory Layer  
 > **Memory That Knows What to Keep and When to Forget**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -47,7 +47,7 @@ Lethe acts as an **Intelligent Memory Operating System** between your AI agent a
 ---
 
 ## Empirical Storage Choice Matrix
-
+    
 | Knowledge Category | Optimal Storage Tier | Accuracy | Latency | Key Advantage |
 |---|---|---|---|---|
 | **Exact Attributes & IDs** (`home_city`, `user.name`) | **Relational SQL Table** | **100.0%** | **0.4 ms** | Deterministic key-value lookup. Zero vector ambiguity, instant updates, exact bitemporal valid-time pruning. |
